@@ -1,0 +1,86 @@
+# Releasing camctl
+
+Releases are changelog-driven. `CHANGELOG.md` (Keep a Changelog) says what a
+release contains, and that decides its version. Version numbers are never
+typed by hand: `cargo xtask release` derives them, writes them into the
+single workspace version in `Cargo.toml`, and moves the changelog entries
+under the new version.
+
+## Versioning rules
+
+The next version comes from the categories under `## [Unreleased]`:
+
+| Version line | `Removed`, or a `BREAKING` note | `Added`, `Changed`, `Deprecated` | `Fixed`, `Security` |
+|---|---|---|---|
+| 0.x | minor (0.1.3 to 0.2.0) | patch | patch |
+| 1.0 and later | major | minor | patch |
+
+While the version is 0.x a minor bump is the breaking boundary, as it is
+for Cargo. The first release takes the version already in `Cargo.toml`.
+`cargo xtask release --version X.Y.Z` overrides the derived version, for
+example to go to 1.0.0.
+
+## Day to day
+
+Every pull request adds a line under `## [Unreleased]` in the right
+category. CI fails a PR that does not touch `CHANGELOG.md`. Label a PR
+`skip-changelog` when it changes nothing a user could notice, such as CI
+tweaks or refactors.
+
+## Cutting a release
+
+```mermaid
+flowchart LR
+    branch[Release branch] --> prep[cargo xtask release]
+    prep --> pr[PR: chore release vX.Y.Z]
+    pr --> merge[Squash-merge to main]
+    merge --> tag[cargo xtask tag on main]
+    tag --> push[git push origin vX.Y.Z]
+    push --> workflow[release workflow]
+    workflow --> published[GitHub release with app, CLI, checksums]
+```
+
+1. From an up-to-date `main`, create a branch, for example `release-v0-2-0`.
+2. Preview the release with `cargo xtask release --dry-run`, then run
+   `cargo xtask release`. It checks that the tree is clean and the tag is
+   new, then:
+   - cuts `## [Unreleased]` into `## [X.Y.Z] - date`,
+   - updates the compare links,
+   - sets the workspace version,
+   - updates `Cargo.lock`,
+   - and commits `chore(release): vX.Y.Z`.
+3. Push the branch, open a PR, and let CI pass. Merge it.
+4. On `main`, pull, then run `cargo xtask tag` (an annotated `vX.Y.Z` tag
+   on HEAD) and push the tag: `git push origin vX.Y.Z`.
+5. The `release` workflow:
+   - checks that the tag matches `Cargo.toml` and the changelog,
+   - runs `cargo xtask ci`,
+   - builds `camctl-X.Y.Z-macos-arm64.zip` (the app),
+     `camctl-cli-X.Y.Z-macos-arm64.tar.gz` and `SHA256SUMS`,
+   - and publishes a GitHub release, with that version's changelog
+     section as the notes.
+
+## Signing and notarization
+
+Without secrets, the release app is ad-hoc signed. It runs, but Gatekeeper
+quarantines it when downloaded. Clear the quarantine with
+`xattr -dr com.apple.quarantine camctl.app`, or build locally with
+`scripts/bundle.sh`. macOS also asks for camera access again after each
+update, because an ad-hoc signature changes with every build.
+
+To publish Developer ID signed and notarized builds, add these repository
+secrets:
+
+| Secret | Value |
+|---|---|
+| `APPLE_DEVELOPER_ID_P12` | The Developer ID Application certificate and key, exported from Keychain Access as .p12, then `base64 -i cert.p12` |
+| `APPLE_DEVELOPER_ID_PASSWORD` | The .p12 export password |
+| `APPLE_DEVELOPER_ID_IDENTITY` | The identity name, for example `Developer ID Application: Name (TEAMID)` |
+| `APPLE_ID` | The Apple ID used for notarization |
+| `APPLE_TEAM_ID` | The team ID |
+| `APPLE_APP_PASSWORD` | An app-specific password for that Apple ID |
+
+With the signing secrets set, `scripts/bundle.sh` signs with the hardened
+runtime and the camera entitlement in `scripts/camctl.entitlements`. With
+the notarization secrets as well, `cargo xtask dist` notarizes and staples
+the app before zipping it.
