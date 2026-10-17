@@ -1,21 +1,108 @@
 # camctl
 
-camctl is a macOS menu bar app and command line tool for controlling UVC webcams. It was built for the OBSBOT Tiny 2 Lite and uses only the standard UVC 1.1 camera terminal and processing unit controls, so it applies to any UVC camera that advertises them.
+[![checks](https://github.com/jamesainslie/camctl/actions/workflows/checks.yml/badge.svg)](https://github.com/jamesainslie/camctl/actions/workflows/checks.yml)
 
-To keep CPU and GPU use low, the app streams only while its preview can be seen, prefers stream formats that need no decoding, caps the preview at 30 fps, and hands frames to the GPU without copying them.
+> **OBSBOT Center is bloatware, and it shows you adverts.** Zooming and
+> aiming a webcam takes a handful of standard USB requests. OBSBOT's app
+> for the job is 713 MB, runs two processes and 80 threads, and keeps the
+> camera streaming after you hide its window. On top of that, it scrolls
+> promotions across its own title bar, and there is no setting to turn
+> them off. The app you need to point your own camera has no business
+> advertising to you. camctl does the same job in one small process, with
+> no adverts and no network traffic, and it sits idle with the camera off
+> while you are not using it.
+
+## camctl vs OBSBOT Center
+
+| | camctl 0.1.0 | OBSBOT Center 2.0.15 |
+|---|---:|---:|
+| Preview hidden: CPU | 0.03% | 28.5% |
+| Preview hidden: memory | 85 MB | 1,297 MB |
+| Preview hidden: camera | Off | Still streaming |
+| Live preview: CPU | 20.7% | 56.9% |
+| Live preview: memory | 305 MB | 1,177 MB |
+| Live preview: threads | 23 | 80 |
+| Processes | 1 | 2 |
+| Size on disk | 19 MB, 3 files | 713 MB, 1,401 files |
+| Network traffic | None | 129 KB received in its first 4 minutes |
+| Adverts | None | In the title bar, with no way to turn them off |
+
+Running in the background with its window hidden, which is how you keep
+OBSBOT Center around for its controls, it uses over a quarter of a CPU
+core and 15 times camctl's memory, and the camera stays on. While
+previewing, it uses nearly three times camctl's CPU and nearly four times
+its memory.
+
+How this was measured: on 2026-10-17, on an Apple M4 Pro running macOS
+26.7.1, with an OBSBOT Tiny 2 Lite. Each app ran alone at its default
+settings and was sampled with `top` once a second for 60 seconds. CPU,
+memory footprint and threads are summed over all of the app's processes,
+and CPU is a percentage of one core. In live preview, OBSBOT Center showed
+the camera's 4K stream in a 1256x703 window, and camctl showed a 640x360
+stream in its 640x420 window. Picking the smallest stream that fills the
+window is part of how camctl stays light. The macOS camera service
+(UVCAssistant) used a further 6% of a core for camctl's preview, and 9%
+for OBSBOT Center whether its window was showing or not. The machine was
+busy with other work at the time, so the absolute numbers may read high
+for both apps. The two were measured back to back under the same
+conditions.
+
+camctl is a small, fast macOS menu bar app and command line tool for
+controlling PTZ (pan, tilt, zoom) webcams. It shows a live preview, aims the
+camera smoothly with the keyboard, mouse or trackpad, and exposes every
+standard control the camera has. It was built for the OBSBOT Tiny 2 Lite,
+and because it speaks only the standard USB Video Class (UVC 1.1) controls
+it works with any UVC camera that offers them.
+
+## Why camctl exists
+
+The OBSBOT Tiny 2 Lite is a good camera with a poor companion app. To zoom
+or aim the camera you have to run OBSBOT Center. It is a heavy,
+always-running app, built for features many people never use (AI tracking,
+gestures, a virtual camera). It keeps the machine busy and the camera on
+while it runs, and it advertises to you while it does
+([the numbers](#camctl-vs-obsbot-center)).
+The camera itself does not need any of that: zoom, pan, tilt, exposure,
+focus and white balance are all ordinary UVC controls that any program can
+set over USB.
+
+camctl is the small tool for just that job. It lives in the menu bar, does
+nothing while you are not using it, and gives you the camera's controls
+directly.
+
+## Aims
+
+- **Light.** No work while the preview is hidden or you are away: no
+  capture, no timers, the camera light off. While previewing, frames go
+  from the camera to the GPU without being copied, and the preview prefers
+  formats that need no decoding.
+- **Smooth.** Pan, tilt and zoom move continuously while held and stop the
+  moment you let go, from keys, a drag, a pad or the scroll wheel. A click
+  aims the camera at what you clicked.
+- **Complete.** Every standard UVC 1.1 camera terminal and processing unit
+  control the camera advertises can be read and set, from the app's
+  controls or the `camctl` CLI.
+- **Standard.** Only the UVC specification, so nothing breaks when the
+  vendor's app updates, and other cameras work too.
+- **Honest.** When the camera is paused, stuck or missing, the window says
+  so, and state changes are logged for diagnosis.
+
+## Non-goals
+
+- OBSBOT's AI features and other vendor-specific controls. They live in a
+  vendor extension unit that camctl lists but never drives, so tracking
+  and gestures stay in the vendor's app.
+- A virtual camera. Other apps read the camera directly, and camctl changes
+  the controls they see.
+- Platforms other than macOS. Capture uses AVFoundation, the menu bar and
+  window use AppKit, and USB device matching relies on IOKit.
 
 The workspace produces two programs:
 
-- `camctl.app` (crate `camctl-app`): a menu bar icon and a floating live preview with pan, tilt and zoom.
-- `camctl` (crate `camctl-cli`): a CLI that lists cameras and reads and writes their controls.
-
-## Scope
-
-camctl does not:
-
-- Drive OBSBOT's AI features or any vendor controls. Vendor extension units are parsed from the descriptors and never driven, so tracking, gestures and similar settings stay in the vendor's app.
-- Provide a virtual camera. Other apps read the camera directly, and camctl changes the controls they see.
-- Run on anything but macOS. Capture uses AVFoundation, the menu bar and window code use AppKit, and USB device matching relies on IOKit location IDs.
+- `camctl.app` (crate `camctl-app`): a menu bar icon and a floating live
+  preview with pan, tilt and zoom.
+- `camctl` (crate `camctl-cli`): a CLI that lists cameras and reads and
+  writes their controls.
 
 ## Features
 
@@ -54,11 +141,29 @@ The bar below the video holds the zoom slider, the current magnification (1.0x t
 
 Drag and click aiming require a camera that reports absolute pan and tilt with a readable range. Zoom inputs and the slider require absolute zoom. The pad shows only the buttons the camera supports.
 
+## Installing a release
+
+Each [release](https://github.com/jamesainslie/camctl/releases) carries:
+
+- `camctl-X.Y.Z-macos-arm64.zip`, the app,
+- `camctl-cli-X.Y.Z-macos-arm64.tar.gz`, the CLI,
+- `SHA256SUMS`.
+
+Unzip the app into `/Applications`. Release builds are ad-hoc signed unless
+the repository has Developer ID secrets (see
+[docs/RELEASING.md](docs/RELEASING.md)), so clear the download quarantine
+once:
+
+```sh
+xattr -dr com.apple.quarantine /Applications/camctl.app
+```
+
 ## Prerequisites
 
 - macOS 14 or later.
-- Rust stable, 1.90 or later (the workspace `rust-version`, edition 2024).
+- Rust via rustup. `rust-toolchain.toml` pins the compiler (1.98.1), and rustup installs it on first use. The minimum supported version is 1.98 (edition 2024), because CI tests the pinned compiler only.
 - Xcode Command Line Tools, for the linker: `xcode-select --install`.
+- For the development checks, [mise](https://mise.jdx.dev). `mise install` installs the versions of actionlint, cargo-deny, shellcheck and zizmor that `mise.toml` pins.
 - For the app: an Apple Development code signing identity in the login keychain. List identities with `security find-identity -v -p codesigning`; Xcode can create one under Settings, Accounts, Manage Certificates.
 - A UVC camera. Pan and tilt need absolute pan-tilt support, and zoom needs absolute zoom support.
 
@@ -91,11 +196,12 @@ scripts/bundle.sh
 open dist/camctl.app
 ```
 
-`scripts/bundle.sh [release|debug]` builds `camctl-app` with the given profile (default `release`), assembles `dist/camctl.app`, writes its `Info.plist`, signs the bundle and verifies the signature. The bundle identifier is `us.ainslies.camctl`, and its version comes from the workspace `Cargo.toml`.
+`scripts/bundle.sh [release|debug]` builds `camctl-app` with the given profile (default `release`), assembles `camctl.app` in `dist/`, writes its `Info.plist`, signs the bundle and verifies the signature. The bundle identifier is `us.ainslies.camctl`, and its version comes from the workspace `Cargo.toml`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CAMCTL_JOBS` | `3` | `cargo build -j` parallelism |
+| `CAMCTL_BUNDLE_DIR` | `dist` | Directory that receives `camctl.app` |
 | `CAMCTL_SIGN_IDENTITY` | `Apple Development` | `codesign` identity |
 
 If the keychain holds more than one Apple Development certificate, `codesign` rejects the default as ambiguous. Set `CAMCTL_SIGN_IDENTITY` to the certificate's full name or SHA-1 hash from `security find-identity`.
@@ -108,7 +214,7 @@ On first launch macOS asks for camera access. If access is denied, the preview s
 tccutil reset Camera us.ainslies.camctl
 ```
 
-Set `CAMCTL_TRACE=1` to log startup steps and the chosen stream format to stderr:
+Set `CAMCTL_TRACE=1` to echo the event log to stderr as well:
 
 ```sh
 open --env CAMCTL_TRACE=1 --stderr /tmp/camctl.log dist/camctl.app
@@ -215,15 +321,161 @@ flowchart TD
 
 ## Development
 
+The workspace pins its compiler in `rust-toolchain.toml` and its lint
+tools in `mise.toml`. `mise install` installs the lint tools. `cargo xtask`
+runs the same tasks locally and in CI:
+
+| Task | What it does |
+|------|--------------|
+| `cargo xtask ci` | `lint`, then `check`: every check CI runs |
+| `cargo xtask lint` | The checks that need no build: formatting, workspace rules, pinned tools, workflows, shell scripts and dependencies |
+| `cargo xtask check` | The checks that build, on macOS only: Clippy and rustdoc with warnings denied, the tests, and smoke tests of the CLI and the app bundle |
+| `cargo xtask install-hooks` | Point git at `.githooks`: a format check before each commit and `cargo xtask ci` before each push |
+| `cargo xtask changelog-check` | Fails unless `CHANGELOG.md` changed against `origin/main` (CI runs it on PRs) |
+| `cargo xtask release` | Changelog-driven release preparation: derive the version, cut the changelog, set the version, commit |
+| `cargo xtask tag` | Tag `main` after a release PR merges |
+| `cargo xtask verify-tag TAG` | Fails unless the tag matches `Cargo.toml` and the changelog (the release workflow runs it) |
+| `cargo xtask dist` | Build the release zip, CLI tarball and checksums into `dist/` |
+| `cargo xtask notes [VERSION]` | Print a version's release notes from the changelog |
+| `cargo xtask version` | Print the workspace version |
+
+Locally, cargo runs with 3 jobs (override with `CAMCTL_JOBS`); on CI it
+uses every core.
+
 ```sh
-cargo test -j 3 --workspace
-cargo clippy -j 3 --workspace --all-targets
-cargo run -j 3 -p camctl-capture --example devices
+mise install
+cargo xtask ci
+cargo run -p camctl-capture --example devices
 ```
 
-The tests need no camera. The `uvc` tests parse configuration descriptors captured from an OBSBOT Tiny 2 Lite (`crates/uvc/tests/fixtures`) and drive `Camera` through fake transports. The `core` tests cover the motion model, the click and drag geometry, and the queue's coalescing. The workspace lints enable Clippy's `all` and `pedantic` groups as warnings and deny `unsafe_op_in_unsafe_fn`.
+The tests need no camera:
 
-The `devices` example prints the camera permission state and each AVFoundation device with its formats as the format policy classifies them.
+- The `uvc` tests parse configuration descriptors captured from an OBSBOT
+  Tiny 2 Lite (`crates/uvc/tests/fixtures`) and drive `Camera` through fake
+  transports.
+- The `core` tests cover the motion model, the click and drag geometry,
+  and the queue's coalescing.
+- The `capture` tests cover the format policy and the frame hand-off.
+- The `xtask` tests cover changelog parsing and consistency, the semver
+  rules, the workspace manifest rules and the tool pins.
+
+The `devices` example prints the camera permission state and each
+AVFoundation device with its formats as the format policy classifies them.
+
+### Checks
+
+`cargo xtask lint` builds only xtask itself, so it runs on Linux as well as
+macOS. In order, it runs:
+
+- rustfmt, as `cargo fmt --all --check`.
+- The workspace rules. Every directory under `crates/` is a workspace
+  member. Every member inherits the workspace `version`, `edition`,
+  `rust-version`, `license` and lints, and sets `publish = false`.
+  `rust-version` matches the compiler pinned in `rust-toolchain.toml`.
+  `CHANGELOG.md` is well formed, its latest release is the version in
+  `Cargo.toml`, and its links point where they should.
+- The pinned tools. Each tool in `mise.toml` must be installed.
+- actionlint on the workflows, with shellcheck on their `run:` steps.
+- zizmor in pedantic mode, offline, for GitHub Actions security issues.
+- shellcheck on `scripts/*.sh` and `.githooks/*`. `.shellcheckrc` enables
+  every optional check except SC2250, which asks for braces around every
+  variable.
+- cargo-deny, with warnings denied. It checks advisories, licences, bans
+  and sources against the policy in `deny.toml`.
+
+`cargo xtask check` builds the macOS-only crates, so it runs on macOS only.
+In order, it runs:
+
+- Clippy on every target and feature, with warnings denied.
+- rustdoc, private items included, with warnings denied.
+- Every test, with `--locked` and `--no-fail-fast`.
+- A CLI smoke test. `camctl --version` must print the workspace version,
+  and `--help` must work for every subcommand.
+- An app bundle smoke test. `scripts/bundle.sh debug` builds an ad-hoc
+  signed bundle under `target/smoke`, so `dist/` is never touched. The
+  bundle must pass `codesign --verify --strict` and `plutil -lint`, and its
+  `Info.plist` must carry the keys macOS needs, among them the bundle
+  identifier, the workspace version, `LSUIElement` and
+  `NSCameraUsageDescription`.
+
+xtask finds each pinned tool through `mise which` when mise is installed,
+so the pinned version runs even when another copy comes first on `PATH`.
+Otherwise it uses the tool on `PATH`. A version other than the pinned one
+prints a warning locally and fails on CI. A missing tool fails locally and
+on CI.
+
+### Lint policy
+
+The workspace lints in `Cargo.toml` enable Clippy's `all` and `pedantic`
+groups. `cargo xtask check` runs Clippy and rustdoc with `-D warnings`, so
+every warning fails CI. Beyond the two groups, the lints require:
+
+- A `SAFETY` comment on every `unsafe` block, and on nothing else.
+  `unsafe_op_in_unsafe_fn` is denied.
+- No `unwrap` or `panic!` outside tests. `clippy.toml` allows both in
+  tests. An `expect` message names the invariant it relies on.
+- No `dbg!`, `todo!` or `unimplemented!`.
+- No `Result` dropped with `.ok();`. Handle the error, or discard it with
+  `let _ =`.
+- `#[expect(..., reason = "...")]` instead of `#[allow]`, so a suppression
+  that no longer applies fails as well.
+
+`[workspace.lints]` in `Cargo.toml` holds the full list.
+
+### Continuous integration
+
+`.github/workflows/checks.yml` runs on pushes to `main`, on pull requests,
+weekly and on demand. Each job runs a `cargo xtask` task, so a CI failure
+reproduces locally with the same command.
+
+| Job | Runner | What it does |
+|-----|--------|--------------|
+| `lint` | `ubuntu-latest` | Installs the tools pinned in `mise.toml` with `jdx/mise-action`, then runs `cargo xtask lint` |
+| `check` | `macos-15` | Runs `cargo xtask check` once `lint` passes, then fails if the checks changed a tracked file such as `Cargo.lock` |
+| `changelog` | `ubuntu-latest` | Runs `cargo xtask changelog-check` on pull requests without the `skip-changelog` label |
+| `checks` | `ubuntu-latest` | Fails if any job above failed or was cancelled |
+
+The `checks` job, shown as **checks passed**, is the one check to require
+in branch protection. It passes when a job was skipped on purpose. The
+weekly run does `lint` only, so new advisories against unchanged
+dependencies still surface. Every action is pinned to a commit SHA.
+Dependabot proposes updates to them weekly, labelled `dependencies` and
+`skip-changelog`.
+
+### Contributing changes
+
+Run `cargo xtask install-hooks` once per clone. It sets `core.hooksPath` to
+`.githooks`, so git runs a format check before each commit and
+`cargo xtask ci` before each push. A repository hooksPath hides any global
+one, so each hook then runs the global hook of the same name, if you have
+one. `git config --local --unset core.hooksPath` undoes it.
+
+Branch from `main`, keep commits in the Conventional Commits style, and add
+a line under `## [Unreleased]` in `CHANGELOG.md`. CI on the pull request
+runs `cargo xtask lint` on Linux and `cargo xtask check` on macOS, and
+checks that the changelog was updated.
+
+## Versioning and releases
+
+camctl follows [Semantic Versioning](https://semver.org). Its changelog,
+[CHANGELOG.md](CHANGELOG.md), is the source of truth for both release
+contents and version numbers. `cargo xtask release` derives the next
+version from the categories under `## [Unreleased]`, and pushing the tag
+that `cargo xtask tag` makes publishes the release from CI. The full
+procedure, including Developer ID signing and notarization, is in
+[docs/RELEASING.md](docs/RELEASING.md).
+
+## Troubleshooting
+
+camctl records state changes (camera opened, paused and why, resumed,
+restarted, failed control writes) in `~/Library/Logs/camctl/camctl.log`:
+
+```sh
+tail -f ~/Library/Logs/camctl/camctl.log
+```
+
+If the stream stalls, the app restarts it, then rebuilds the capture
+session, and says so in the window if the camera still sends no video.
 
 ## Notes and limitations
 
@@ -241,4 +493,4 @@ The `devices` example prints the camera permission state and each AVFoundation d
 
 ## License
 
-The workspace `Cargo.toml` declares the MIT license.
+MIT. See [LICENSE](LICENSE).

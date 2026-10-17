@@ -1,0 +1,109 @@
+name: release
+
+# Tags are made by `cargo xtask tag` after a release PR (from
+# `cargo xtask release`) has merged. See docs/RELEASING.md.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  # Backtraces for panics only, not for every xtask error.
+  RUST_LIB_BACKTRACE: "0"
+
+jobs:
+  release:
+    name: build and publish the release
+    runs-on: macos-15
+    timeout-minutes: 60
+    permissions:
+      contents: write # create the GitHub release and upload its assets
+    env:
+      # Developer ID signing and notarization run only when these secrets
+      # exist; without them the app is ad-hoc signed.
+      HAS_SIGNING: ${{ secrets.APPLE_DEVELOPER_ID_P12 != '' }}
+      HAS_NOTARY: ${{ secrets.APPLE_APP_PASSWORD != '' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      # No build cache: a release builds from the tagged sources alone.
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Install the tools pinned in mise.toml
+        uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          cache: false
+
+      - name: Verify the tag matches Cargo.toml and CHANGELOG.md
+        run: cargo xtask verify-tag "$GITHUB_REF_NAME"
+
+      - name: cargo xtask ci
+        run: cargo xtask ci
+
+      - name: Import the Developer ID certificate
+        if: env.HAS_SIGNING == 'true'
+        env:
+          P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_IDENTITY }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -P "$P12_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          rm "$RUNNER_TEMP/cert.p12"
+          echo "CAMCTL_SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Use an ad-hoc signature
+        if: env.HAS_SIGNING != 'true'
+        run: echo "CAMCTL_SIGN_IDENTITY=-" >> "$GITHUB_ENV"
+
+      - name: Build the app and the CLI
+        env:
+          APPLE_ID: ${{ env.HAS_NOTARY == 'true' && secrets.APPLE_ID || '' }}
+          APPLE_TEAM_ID: ${{ env.HAS_NOTARY == 'true' && secrets.APPLE_TEAM_ID || '' }}
+          APPLE_APP_PASSWORD: ${{ env.HAS_NOTARY == 'true' && secrets.APPLE_APP_PASSWORD || '' }}
+        run: |
+          set -euo pipefail
+          # Unset empty credentials so xtask skips notarization cleanly.
+          for v in APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
+            [ -n "${!v}" ] || unset "$v"
+          done
+          cargo xtask dist
+
+      - name: Write the release notes from CHANGELOG.md
+        run: cargo xtask notes "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"
+
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "camctl $version" \
+            --notes-file "$RUNNER_TEMP/notes.md" \
+            --verify-tag \
+            dist/camctl-"$version"-macos-*.zip \
+            dist/camctl-cli-"$version"-macos-*.tar.gz \
+            dist/SHA256SUMS

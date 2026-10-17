@@ -1,0 +1,57 @@
+# cargo-deny: supply-chain checks run by `cargo xtask ci`.
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+# camctl only builds for macOS; judge the dependencies it actually uses.
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin"]
+
+[advisories]
+version = 2
+# Every RustSec advisory (vulnerabilities, unsound code, unmaintained
+# crates) fails the check unless it is listed here with a reason.
+yanked = "deny"
+ignore = [
+  # Unmaintained crates that only GPUI pulls in (via gpui-kit). camctl does
+  # not use them directly and cannot swap them out; revisit when gpui-kit
+  # updates.
+  { id = "RUSTSEC-2024-0384", reason = "instant, via gpui-base" },
+  { id = "RUSTSEC-2024-0436", reason = "paste, via gpui-component and gpui-pre-apple" },
+  { id = "RUSTSEC-2026-0192", reason = "ttf-parser, via gpui-pre's text stack" },
+  { id = "RUSTSEC-2026-0206", reason = "rustybuzz, via gpui-pre's text stack" },
+]
+
+[licenses]
+version = 2
+# Permissive licences only, compatible with camctl's MIT licence, and only
+# those the dependency tree uses: a new one is a deliberate decision.
+allow = [
+  "0BSD",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "BSL-1.0",
+  "CC0-1.0",
+  "MIT",
+  "MPL-2.0",
+  "Unicode-3.0",
+  "Unlicense",
+  "Zlib",
+]
+confidence-threshold = 0.9
+
+[licenses.private]
+# The workspace crates are not published; their licence is camctl's.
+ignore = true
+
+[bans]
+# GPUI's dependency tree carries several duplicate versions it controls;
+# flagging them would be noise camctl cannot act on.
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

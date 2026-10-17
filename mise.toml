@@ -1,0 +1,8 @@
+# Tools `cargo xtask lint` runs, pinned so local runs and CI agree.
+# `mise install` installs them; CI installs the same versions from this
+# file. The Rust toolchain itself is pinned in rust-toolchain.toml.
+[tools]
+actionlint = "1.7.12"
+cargo-deny = "0.20.2"
+shellcheck = "0.11.0"
+zizmor = "1.31.1"

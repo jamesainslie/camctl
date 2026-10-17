@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Used with the hardened runtime (Developer ID builds): camera access
+     must be declared, or the capture session gets no frames. -->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.device.camera</key>
+  <true/>
+</dict>
+</plist>

@@ -228,6 +228,12 @@ mod tests {
     }
 
     #[test]
+    fn the_command_line_definition_is_valid() {
+        use clap::CommandFactory as _;
+        Cli::command().debug_assert();
+    }
+
+    #[test]
     fn flags_still_work() {
         let cli = Cli::try_parse_from(["camctl", "-c", "1", "controls"]).unwrap();
         assert_eq!(cli.camera, 1);

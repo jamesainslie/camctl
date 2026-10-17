@@ -1,0 +1,17 @@
+#!/bin/sh
+# usage: .githooks/run-global HOOK [ARGS...]
+#
+# The repository's hooksPath hides any global one (core.hooksPath in the
+# global or system git config, included files counted), so each hook here
+# ends by running that hooksPath's hook of the same name, when there is one.
+set -eu
+hook="$1"
+shift
+global=""
+for scope in --global --system; do
+  global="$(git config "${scope}" --includes --type=path --get core.hooksPath || true)"
+  [ -n "${global}" ] && break
+done
+if [ -n "${global}" ] && [ -x "${global}/${hook}" ]; then
+  exec "${global}/${hook}" "$@"
+fi

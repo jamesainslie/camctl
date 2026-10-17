@@ -43,7 +43,10 @@ impl Transport for FakeTransport {
 }
 
 fn camera(t: FakeTransport) -> Camera<FakeTransport> {
-    Camera::new(parse_configuration(TINY2_LITE).unwrap(), t)
+    Camera::new(
+        parse_configuration(TINY2_LITE).expect("the fixture parses"),
+        t,
+    )
 }
 
 use RequestCode::{GetCur, GetDef, GetInfo, GetMax, GetMin, GetRes, SetCur};

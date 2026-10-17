@@ -1,0 +1,6 @@
+#!/bin/sh
+# Every check CI runs, before each push, then the global pre-push hook.
+# Installed by `cargo xtask install-hooks`.
+set -eu
+cargo xtask ci
+exec "$(dirname "$0")/run-global" pre-push "$@"

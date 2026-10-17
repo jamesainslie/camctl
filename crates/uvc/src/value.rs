@@ -195,8 +195,10 @@ fn degrees_to_arc_seconds(degrees: f64) -> Result<i32, ValueError> {
     if !arc.is_finite() || arc < f64::from(i32::MIN) || arc > f64::from(i32::MAX) {
         return Err(ValueError::BadDegrees(degrees.to_string()));
     }
-    // Truncation is impossible: `arc` is a whole number inside i32's range.
-    #[allow(clippy::cast_possible_truncation)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "arc is a whole number inside i32's range"
+    )]
     Ok(arc as i32)
 }
 

@@ -1,0 +1,3 @@
+# Every optional check except require-variable-braces, which is pure style.
+enable=all
+disable=SC2250
