@@ -25,7 +25,7 @@ example to go to 1.0.0.
 Every pull request adds a line under `## [Unreleased]` in the right
 category. CI fails a PR that does not touch `CHANGELOG.md`. Label a PR
 `skip-changelog` when it changes nothing a user could notice, such as CI
-tweaks or refactors.
+tweaks or refactors. Dependabot's action updates carry that label already.
 
 ## Cutting a release
 
@@ -52,9 +52,13 @@ flowchart LR
 3. Push the branch, open a PR, and let CI pass. Merge it.
 4. On `main`, pull, then run `cargo xtask tag` (an annotated `vX.Y.Z` tag
    on HEAD) and push the tag: `git push origin vX.Y.Z`.
-5. The `release` workflow:
+5. The `release` workflow builds from the tagged sources alone. It
+   restores no Cargo build cache and no mise tool cache, so a cache
+   poisoned by another run cannot reach a release. It:
+   - installs the pinned toolchain and the tools pinned in `mise.toml`,
    - checks that the tag matches `Cargo.toml` and the changelog,
-   - runs `cargo xtask ci`,
+   - runs `cargo xtask ci`, the checks described in the README's
+     [Checks](../README.md#checks) section,
    - builds `camctl-X.Y.Z-macos-arm64.zip` (the app),
      `camctl-cli-X.Y.Z-macos-arm64.tar.gz` and `SHA256SUMS`,
    - and publishes a GitHub release, with that version's changelog

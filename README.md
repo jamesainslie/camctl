@@ -2,6 +2,51 @@
 
 [![checks](https://github.com/jamesainslie/camctl/actions/workflows/checks.yml/badge.svg)](https://github.com/jamesainslie/camctl/actions/workflows/checks.yml)
 
+> **OBSBOT Center is bloatware, and it shows you adverts.** Zooming and
+> aiming a webcam takes a handful of standard USB requests. OBSBOT's app
+> for the job is 713 MB, runs two processes and 80 threads, and keeps the
+> camera streaming after you hide its window. On top of that, it scrolls
+> promotions across its own title bar, and there is no setting to turn
+> them off. The app you need to point your own camera has no business
+> advertising to you. camctl does the same job in one small process, with
+> no adverts and no network traffic, and it sits idle with the camera off
+> while you are not using it.
+
+## camctl vs OBSBOT Center
+
+| | camctl 0.1.0 | OBSBOT Center 2.0.15 |
+|---|---:|---:|
+| Preview hidden: CPU | 0.03% | 28.5% |
+| Preview hidden: memory | 85 MB | 1,297 MB |
+| Preview hidden: camera | Off | Still streaming |
+| Live preview: CPU | 20.7% | 56.9% |
+| Live preview: memory | 305 MB | 1,177 MB |
+| Live preview: threads | 23 | 80 |
+| Processes | 1 | 2 |
+| Size on disk | 19 MB, 3 files | 713 MB, 1,401 files |
+| Network traffic | None | 129 KB received in its first 4 minutes |
+| Adverts | None | In the title bar, with no way to turn them off |
+
+Running in the background with its window hidden, which is how you keep
+OBSBOT Center around for its controls, it uses over a quarter of a CPU
+core and 15 times camctl's memory, and the camera stays on. While
+previewing, it uses nearly three times camctl's CPU and nearly four times
+its memory.
+
+How this was measured: on 2026-10-17, on an Apple M4 Pro running macOS
+26.7.1, with an OBSBOT Tiny 2 Lite. Each app ran alone at its default
+settings and was sampled with `top` once a second for 60 seconds. CPU,
+memory footprint and threads are summed over all of the app's processes,
+and CPU is a percentage of one core. In live preview, OBSBOT Center showed
+the camera's 4K stream in a 1256x703 window, and camctl showed a 640x360
+stream in its 640x420 window. Picking the smallest stream that fills the
+window is part of how camctl stays light. The macOS camera service
+(UVCAssistant) used a further 6% of a core for camctl's preview, and 9%
+for OBSBOT Center whether its window was showing or not. The machine was
+busy with other work at the time, so the absolute numbers may read high
+for both apps. The two were measured back to back under the same
+conditions.
+
 camctl is a small, fast macOS menu bar app and command line tool for
 controlling PTZ (pan, tilt, zoom) webcams. It shows a live preview, aims the
 camera smoothly with the keyboard, mouse or trackpad, and exposes every
@@ -14,7 +59,9 @@ it works with any UVC camera that offers them.
 The OBSBOT Tiny 2 Lite is a good camera with a poor companion app. To zoom
 or aim the camera you have to run OBSBOT Center. It is a heavy,
 always-running app, built for features many people never use (AI tracking,
-gestures, a virtual camera), and it keeps the machine busy while it runs.
+gestures, a virtual camera). It keeps the machine busy and the camera on
+while it runs, and it advertises to you while it does
+([the numbers](#camctl-vs-obsbot-center)).
 The camera itself does not need any of that: zoom, pan, tilt, exposure,
 focus and white balance are all ordinary UVC controls that any program can
 set over USB.
@@ -114,8 +161,9 @@ xattr -dr com.apple.quarantine /Applications/camctl.app
 ## Prerequisites
 
 - macOS 14 or later.
-- Rust via rustup. `rust-toolchain.toml` pins the compiler (1.98.1), and rustup installs it on first use. The minimum supported version is 1.90 (edition 2024).
+- Rust via rustup. `rust-toolchain.toml` pins the compiler (1.98.1), and rustup installs it on first use. The minimum supported version is 1.98 (edition 2024), because CI tests the pinned compiler only.
 - Xcode Command Line Tools, for the linker: `xcode-select --install`.
+- For the development checks, [mise](https://mise.jdx.dev). `mise install` installs the versions of actionlint, cargo-deny, shellcheck and zizmor that `mise.toml` pins.
 - For the app: an Apple Development code signing identity in the login keychain. List identities with `security find-identity -v -p codesigning`; Xcode can create one under Settings, Accounts, Manage Certificates.
 - A UVC camera. Pan and tilt need absolute pan-tilt support, and zoom needs absolute zoom support.
 
@@ -148,11 +196,12 @@ scripts/bundle.sh
 open dist/camctl.app
 ```
 
-`scripts/bundle.sh [release|debug]` builds `camctl-app` with the given profile (default `release`), assembles `dist/camctl.app`, writes its `Info.plist`, signs the bundle and verifies the signature. The bundle identifier is `us.ainslies.camctl`, and its version comes from the workspace `Cargo.toml`.
+`scripts/bundle.sh [release|debug]` builds `camctl-app` with the given profile (default `release`), assembles `camctl.app` in `dist/`, writes its `Info.plist`, signs the bundle and verifies the signature. The bundle identifier is `us.ainslies.camctl`, and its version comes from the workspace `Cargo.toml`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `CAMCTL_JOBS` | `3` | `cargo build -j` parallelism |
+| `CAMCTL_BUNDLE_DIR` | `dist` | Directory that receives `camctl.app` |
 | `CAMCTL_SIGN_IDENTITY` | `Apple Development` | `codesign` identity |
 
 If the keychain holds more than one Apple Development certificate, `codesign` rejects the default as ambiguous. Set `CAMCTL_SIGN_IDENTITY` to the certificate's full name or SHA-1 hash from `security find-identity`.
@@ -272,22 +321,29 @@ flowchart TD
 
 ## Development
 
-The workspace pins its compiler in `rust-toolchain.toml`, and `cargo xtask`
+The workspace pins its compiler in `rust-toolchain.toml` and its lint
+tools in `mise.toml`. `mise install` installs the lint tools. `cargo xtask`
 runs the same tasks locally and in CI:
 
 | Task | What it does |
 |------|--------------|
-| `cargo xtask ci` | `cargo fmt --check`, Clippy with warnings denied, and every test: what CI runs |
+| `cargo xtask ci` | `lint`, then `check`: every check CI runs |
+| `cargo xtask lint` | The checks that need no build: formatting, workspace rules, pinned tools, workflows, shell scripts and dependencies |
+| `cargo xtask check` | The checks that build, on macOS only: Clippy and rustdoc with warnings denied, the tests, and smoke tests of the CLI and the app bundle |
+| `cargo xtask install-hooks` | Point git at `.githooks`: a format check before each commit and `cargo xtask ci` before each push |
 | `cargo xtask changelog-check` | Fails unless `CHANGELOG.md` changed against `origin/main` (CI runs it on PRs) |
 | `cargo xtask release` | Changelog-driven release preparation: derive the version, cut the changelog, set the version, commit |
 | `cargo xtask tag` | Tag `main` after a release PR merges |
+| `cargo xtask verify-tag TAG` | Fails unless the tag matches `Cargo.toml` and the changelog (the release workflow runs it) |
 | `cargo xtask dist` | Build the release zip, CLI tarball and checksums into `dist/` |
 | `cargo xtask notes [VERSION]` | Print a version's release notes from the changelog |
+| `cargo xtask version` | Print the workspace version |
 
 Locally, cargo runs with 3 jobs (override with `CAMCTL_JOBS`); on CI it
 uses every core.
 
 ```sh
+mise install
 cargo xtask ci
 cargo run -p camctl-capture --example devices
 ```
@@ -300,19 +356,104 @@ The tests need no camera:
 - The `core` tests cover the motion model, the click and drag geometry,
   and the queue's coalescing.
 - The `capture` tests cover the format policy and the frame hand-off.
-- The `xtask` tests cover changelog parsing and the semver rules.
-
-The workspace lints enable Clippy's `all` and `pedantic` groups and deny
-`unsafe_op_in_unsafe_fn`.
+- The `xtask` tests cover changelog parsing and consistency, the semver
+  rules, the workspace manifest rules and the tool pins.
 
 The `devices` example prints the camera permission state and each
 AVFoundation device with its formats as the format policy classifies them.
 
+### Checks
+
+`cargo xtask lint` builds only xtask itself, so it runs on Linux as well as
+macOS. In order, it runs:
+
+- rustfmt, as `cargo fmt --all --check`.
+- The workspace rules. Every directory under `crates/` is a workspace
+  member. Every member inherits the workspace `version`, `edition`,
+  `rust-version`, `license` and lints, and sets `publish = false`.
+  `rust-version` matches the compiler pinned in `rust-toolchain.toml`.
+  `CHANGELOG.md` is well formed, its latest release is the version in
+  `Cargo.toml`, and its links point where they should.
+- The pinned tools. Each tool in `mise.toml` must be installed.
+- actionlint on the workflows, with shellcheck on their `run:` steps.
+- zizmor in pedantic mode, offline, for GitHub Actions security issues.
+- shellcheck on `scripts/*.sh` and `.githooks/*`. `.shellcheckrc` enables
+  every optional check except SC2250, which asks for braces around every
+  variable.
+- cargo-deny, with warnings denied. It checks advisories, licences, bans
+  and sources against the policy in `deny.toml`.
+
+`cargo xtask check` builds the macOS-only crates, so it runs on macOS only.
+In order, it runs:
+
+- Clippy on every target and feature, with warnings denied.
+- rustdoc, private items included, with warnings denied.
+- Every test, with `--locked` and `--no-fail-fast`.
+- A CLI smoke test. `camctl --version` must print the workspace version,
+  and `--help` must work for every subcommand.
+- An app bundle smoke test. `scripts/bundle.sh debug` builds an ad-hoc
+  signed bundle under `target/smoke`, so `dist/` is never touched. The
+  bundle must pass `codesign --verify --strict` and `plutil -lint`, and its
+  `Info.plist` must carry the keys macOS needs, among them the bundle
+  identifier, the workspace version, `LSUIElement` and
+  `NSCameraUsageDescription`.
+
+xtask finds each pinned tool through `mise which` when mise is installed,
+so the pinned version runs even when another copy comes first on `PATH`.
+Otherwise it uses the tool on `PATH`. A version other than the pinned one
+prints a warning locally and fails on CI. A missing tool fails locally and
+on CI.
+
+### Lint policy
+
+The workspace lints in `Cargo.toml` enable Clippy's `all` and `pedantic`
+groups. `cargo xtask check` runs Clippy and rustdoc with `-D warnings`, so
+every warning fails CI. Beyond the two groups, the lints require:
+
+- A `SAFETY` comment on every `unsafe` block, and on nothing else.
+  `unsafe_op_in_unsafe_fn` is denied.
+- No `unwrap` or `panic!` outside tests. `clippy.toml` allows both in
+  tests. An `expect` message names the invariant it relies on.
+- No `dbg!`, `todo!` or `unimplemented!`.
+- No `Result` dropped with `.ok();`. Handle the error, or discard it with
+  `let _ =`.
+- `#[expect(..., reason = "...")]` instead of `#[allow]`, so a suppression
+  that no longer applies fails as well.
+
+`[workspace.lints]` in `Cargo.toml` holds the full list.
+
+### Continuous integration
+
+`.github/workflows/checks.yml` runs on pushes to `main`, on pull requests,
+weekly and on demand. Each job runs a `cargo xtask` task, so a CI failure
+reproduces locally with the same command.
+
+| Job | Runner | What it does |
+|-----|--------|--------------|
+| `lint` | `ubuntu-latest` | Installs the tools pinned in `mise.toml` with `jdx/mise-action`, then runs `cargo xtask lint` |
+| `check` | `macos-15` | Runs `cargo xtask check` once `lint` passes, then fails if the checks changed a tracked file such as `Cargo.lock` |
+| `changelog` | `ubuntu-latest` | Runs `cargo xtask changelog-check` on pull requests without the `skip-changelog` label |
+| `checks` | `ubuntu-latest` | Fails if any job above failed or was cancelled |
+
+The `checks` job, shown as **checks passed**, is the one check to require
+in branch protection. It passes when a job was skipped on purpose. The
+weekly run does `lint` only, so new advisories against unchanged
+dependencies still surface. Every action is pinned to a commit SHA.
+Dependabot proposes updates to them weekly, labelled `dependencies` and
+`skip-changelog`.
+
 ### Contributing changes
+
+Run `cargo xtask install-hooks` once per clone. It sets `core.hooksPath` to
+`.githooks`, so git runs a format check before each commit and
+`cargo xtask ci` before each push. A repository hooksPath hides any global
+one, so each hook then runs the global hook of the same name, if you have
+one. `git config --local --unset core.hooksPath` undoes it.
 
 Branch from `main`, keep commits in the Conventional Commits style, and add
 a line under `## [Unreleased]` in `CHANGELOG.md`. CI on the pull request
-runs `cargo xtask ci` on macOS and checks that the changelog was updated.
+runs `cargo xtask lint` on Linux and `cargo xtask check` on macOS, and
+checks that the changelog was updated.
 
 ## Versioning and releases
 
