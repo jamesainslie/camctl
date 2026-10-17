@@ -130,7 +130,7 @@ camctl [-c N] <command>
 | `camctl formats` | Streaming formats, frame sizes and frame rates from the USB descriptors |
 | `camctl get <control>` | Read one control |
 | `camctl set <control> <value>` | Write one control, then print the value read back |
-| `camctl point <pan> <tilt>` | Set absolute pan and tilt, in degrees |
+| `camctl point <right> <up>` | Point the camera, in degrees right and up from centre, on every camera |
 | `camctl home` | Pan and tilt to 0, and zoom all the way out |
 
 ### Examples
@@ -139,8 +139,8 @@ camctl [-c N] <command>
 camctl list                          # find the camera index
 camctl -c 1 controls                 # controls of the second camera
 camctl formats
-camctl point -20 5                   # pan -20 degrees, tilt 5 degrees
-camctl get pan-tilt                  # for example: pan -20.0°, tilt 5.0°
+camctl point -20 5                   # 20 degrees left, 5 degrees up
+camctl get pan-tilt                  # the camera's own values (an OBSBOT shows pan 20.0°)
 camctl set pan-tilt -20,5            # the same move through set
 camctl set zoom 40
 camctl set brightness -5
@@ -230,11 +230,11 @@ The `devices` example prints the camera permission state and each AVFoundation d
 - **AVFoundation format names.** On macOS, a UVC camera's MJPEG modes appear in AVFoundation already decoded, with the media subtype `420v`, and its raw modes keep their own subtype, `yuvs` for YUY2. camctl therefore counts `420v` from a USB camera as MJPEG, with a decoding cost, and `420v` from the built-in camera as native.
 - **Format policy.** An uncompressed mode such as YUY2 is preferred whenever it covers the preview width within a 1.5x stretch, since it needs no decoding. Otherwise the smallest MJPEG mode that covers it within 1.1x is used. Modes below 24 fps or wider than 1920 px are skipped, and the frame rate is capped at 30 fps. The app chooses the format once, when the camera opens, for a 960x540 device-pixel preview; on the Tiny 2 Lite that selects 640x360 YUY2. Resizing the window does not change the format.
 - **Other apps.** While another app is using the camera, camctl leaves the active format alone, since changing it would change that app's stream too.
-- **OBSBOT pan direction.** OBSBOT cameras pan left for positive pan, against the UVC convention. The app recognises them by USB vendor ID `0x3564` and inverts pan; other cameras are assumed to follow the convention. The CLI does not invert: `camctl point` and `camctl set pan-tilt` use the camera's own sign, so on an OBSBOT `camctl point 20 0` turns left, and the app's pan readout has the opposite sign to `camctl get pan-tilt`.
+- **OBSBOT pan direction.** OBSBOT cameras pan left for positive pan, against the UVC convention. `camctl-core`'s quirks table recognises them by USB vendor ID `0x3564`, and both the app and `camctl point` work in right-and-up terms on every camera. `camctl get` and `camctl set pan-tilt` show and take the camera's own values, so on an OBSBOT their pan sign is the opposite of the app's readout.
 - **Relative pan.** The Tiny 2 Lite's relative pan-tilt control pans in one direction only. This is why the app never uses relative moves and instead streams absolute targets that advance at a steady rate. The CLI's `pan-tilt-move` is subject to the same camera behaviour.
 - **Position sync.** The camera's on-device tracking can move it without camctl. While the preview streams and no input is held, the app reads pan, tilt and zoom every 2 s and adopts them, so held moves and click-to-aim start from where the camera points.
 - **Click to focus.** UVC 1.1 has no focus-point control. A click aims the camera at the point, and the camera's continuous autofocus then focuses on what is now centred. This requires autofocus to be on, for example with `camctl set focus-auto on`.
-- **Lens geometry.** Click-to-aim uses the Tiny 2 Lite's published field of view (67.2 degrees horizontal, 1x to 4x zoom) for every camera, and the magnification readout assumes the same zoom range. On other cameras a click can overshoot or undershoot.
+- **Lens geometry.** Click-to-aim needs the lens's field of view. The quirks table knows the Tiny 2 Lite (67.2 degrees horizontal, 1x to 4x zoom). Other cameras get a typical webcam guess (70 degrees, no assumed zoom magnification), so a click lands close and a second click refines it. The aim rotates the clicked ray by the current tilt, so corners and tilted views aim correctly.
 - **Camera choice.** The app has no camera picker. A built-in camera, used only when no USB camera is present, gets a preview without controls. The CLI selects cameras with `-c`.
 - **USB access.** nusb opens a device exclusively when it can and falls back to shared access when the system driver has claimed it, which is the usual case for a camera. Quit camctl before running a vendor firmware updater that needs the device to itself.
 - **UVC coverage.** camctl reads the first video function of a device, addresses the first processing unit, and omits the analog video controls and the UVC 1.5 additions.
