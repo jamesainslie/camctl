@@ -1,0 +1,16 @@
+[package]
+name = "xtask"
+description = "camctl's task runner: CI checks, changelog-driven releases, distribution builds"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+semver = "1"
+
+[lints]
+workspace = true
