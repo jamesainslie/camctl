@@ -7,7 +7,7 @@ const TINY2_LITE: &[u8] = include_bytes!("fixtures/obsbot-tiny-2-lite-config.bin
 
 /// Set wTotalLength to the buffer's real length.
 fn fix_total(bytes: &mut [u8]) {
-    let total = u16::try_from(bytes.len()).unwrap();
+    let total = u16::try_from(bytes.len()).expect("fixtures fit in u16");
     bytes[2..4].copy_from_slice(&total.to_le_bytes());
 }
 

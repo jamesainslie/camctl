@@ -1,1 +1,5 @@
 doc-valid-idents = ["..", "IOKit", "AVFoundation", "CoreMedia", "CoreVideo", "IOSurface", "GPUI", "FourCC", "AppKit", "VideoToolbox", "MJPEG", "DriverKit"]
+
+# Tests may unwrap and panic; shipped code may not (see the workspace lints).
+allow-unwrap-in-tests = true
+allow-panic-in-tests = true

@@ -1,8 +1,8 @@
-// Clamped positions are exact by design, and the tick counts are small.
-#![allow(
+#![expect(
     clippy::float_cmp,
     clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
+    clippy::cast_sign_loss,
+    reason = "clamped positions are exact by design, and the tick counts are small"
 )]
 
 use camctl_core::motion::{Fov, Limits, Motion, Rig, Speeds, Stick};

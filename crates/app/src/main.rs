@@ -1,8 +1,5 @@
 //! camctl: menu bar camera control with a floating live preview.
 
-// GPUI's API is built to be glob-imported, as its own examples do.
-#![allow(clippy::wildcard_imports)]
-
 mod assets;
 mod away;
 mod events;
@@ -12,7 +9,10 @@ mod status_item;
 
 use futures::StreamExt;
 use gpui_kit::component::{Theme, ThemeMode, TitleBar};
-use gpui_kit::*;
+use gpui_kit::{
+    ActivationPolicy, AnyWindowHandle, App, AppContext, Bounds, Entity, Global, Subscription,
+    WindowBounds, WindowKind, WindowOptions, px, size,
+};
 use objc2::MainThreadMarker;
 
 use crate::preview::{Preview, PreviewEvent};

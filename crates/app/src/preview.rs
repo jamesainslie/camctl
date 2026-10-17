@@ -24,7 +24,14 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, TitleBar, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
-use gpui_kit::*;
+use gpui_kit::{
+    AnyElement, AppContext, Bounds, Context, CursorStyle, DispatchPhase, Div, Entity, EventEmitter,
+    FocusHandle, InteractiveElement, IntoElement, KeyDownEvent, KeyUpEvent, Modifiers,
+    ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    ParentElement, Pixels, Point, Render, Result, ScrollDelta, ScrollWheelEvent, SharedString,
+    Stateful, StatefulInteractiveElement, Styled, Subscription, Task, Window, canvas, div, hsla,
+    px, surface,
+};
 
 /// How often held input advances the targets.
 const TICK: Duration = Duration::from_millis(33);

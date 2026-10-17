@@ -51,13 +51,17 @@ impl Transport for GatedTransport {
     }
 
     fn control_out(&self, req: &Request, data: &[u8]) -> Result<(), TransportError> {
-        let _ = self.started.lock().unwrap().send(());
+        // The test may have stopped listening; a lost signal is harmless.
+        let _ = self.started.lock().expect("started lock").send(());
         self.gate
             .lock()
-            .unwrap()
+            .expect("gate lock")
             .recv_timeout(Duration::from_secs(5))
             .map_err(|_| TransportError::Timeout)?;
-        self.writes.lock().unwrap().push((req.value, data.to_vec()));
+        self.writes
+            .lock()
+            .expect("writes lock")
+            .push((req.value, data.to_vec()));
         Ok(())
     }
 }
@@ -132,7 +136,7 @@ fn failed_writes_are_reported_with_their_control() {
 #[test]
 fn dropping_the_queue_stops_its_worker_and_releases_the_camera() {
     /// Holds a token for as long as the camera (and so the worker) lives.
-    struct Tokened(#[allow(dead_code)] Arc<()>);
+    struct Tokened(#[expect(dead_code, reason = "held for its drop")] Arc<()>);
     impl Transport for Tokened {
         fn control_in(&self, _req: &Request) -> Result<Vec<u8>, TransportError> {
             Err(TransportError::Stall)
@@ -166,17 +170,18 @@ struct GatedRecording {
 
 impl Transport for GatedRecording {
     fn control_in(&self, _req: &Request) -> Result<Vec<u8>, TransportError> {
-        self.log.lock().unwrap().push("read");
+        self.log.lock().expect("log lock").push("read");
         Ok(vec![42, 0])
     }
     fn control_out(&self, _req: &Request, _data: &[u8]) -> Result<(), TransportError> {
-        let _ = self.started.lock().unwrap().send(());
+        // The test may have stopped listening; a lost signal is harmless.
+        let _ = self.started.lock().expect("started lock").send(());
         self.gate
             .lock()
-            .unwrap()
+            .expect("gate lock")
             .recv_timeout(Duration::from_secs(5))
             .map_err(|_| TransportError::Timeout)?;
-        self.log.lock().unwrap().push("write");
+        self.log.lock().expect("log lock").push("write");
         Ok(())
     }
 }

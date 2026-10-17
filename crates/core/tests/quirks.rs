@@ -1,5 +1,4 @@
-// Signs and lens constants compare exactly.
-#![allow(clippy::float_cmp)]
+#![expect(clippy::float_cmp, reason = "signs and lens constants compare exactly")]
 
 use camctl_core::motion::Fov;
 use camctl_core::quirks;

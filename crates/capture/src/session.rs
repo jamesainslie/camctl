@@ -445,9 +445,11 @@ impl Session {
     /// Start streaming (asynchronously, on the capture queue).
     pub fn start(&self) {
         let session = SessionOnQueue(self.capture.clone());
-        // SAFETY: startRunning is meant to be called off the main thread.
         self.queue.exec_async(move || {
             let session = session;
+            // SAFETY: `session.0` is a live, retained AVCaptureSession, and
+            // startRunning has no other preconditions. It blocks until the
+            // session runs, which is why it runs here on the capture queue.
             unsafe { session.0.startRunning() }
         });
     }
@@ -455,9 +457,11 @@ impl Session {
     /// Stop streaming; the camera light goes off.
     pub fn stop(&self) {
         let session = SessionOnQueue(self.capture.clone());
-        // SAFETY: as for start.
         self.queue.exec_async(move || {
             let session = session;
+            // SAFETY: `session.0` is a live, retained AVCaptureSession, and
+            // stopRunning has no other preconditions. It blocks until the
+            // session stops, which is why it runs here on the capture queue.
             unsafe { session.0.stopRunning() }
         });
     }
@@ -502,9 +506,10 @@ impl Drop for Session {
         // never dropped on the capture queue itself, where exec_sync would
         // trap.
         let session = SessionOnQueue(self.capture.clone());
-        // SAFETY: as for start.
         self.queue.exec_sync(move || {
             let session = session;
+            // SAFETY: as in `stop`: `session.0` is a live, retained
+            // AVCaptureSession, and stopRunning has no other preconditions.
             unsafe { session.0.stopRunning() }
         });
         // SAFETY: clearing the delegate with a nil queue is allowed.
