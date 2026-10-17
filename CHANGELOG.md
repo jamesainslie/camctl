@@ -9,6 +9,8 @@ anything else bumps the patch; see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-17
+
 ### Added
 
 - Menu bar app (`camctl.app`) with a custom template icon whose lens fills
@@ -48,4 +50,5 @@ anything else bumps the patch; see [docs/RELEASING.md](docs/RELEASING.md).
 - `cargo xtask` task runner, CI on GitHub Actions, and changelog-driven
   releases that publish the signed app and the CLI.
 
-[Unreleased]: https://github.com/jamesainslie/camctl/commits/main
+[Unreleased]: https://github.com/jamesainslie/camctl/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/jamesainslie/camctl/releases/tag/v0.1.0
