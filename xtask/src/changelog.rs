@@ -12,10 +12,22 @@
 //!
 //! The very first release takes the version already in `Cargo.toml`.
 
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 
 use anyhow::{Context, Result, bail};
 use semver::Version;
+
+/// The Keep a Changelog categories. The version bump reads these names, so
+/// any other spelling is an error rather than a silently smaller bump.
+const CATEGORIES: [&str; 6] = [
+    "Added",
+    "Changed",
+    "Deprecated",
+    "Removed",
+    "Fixed",
+    "Security",
+];
 
 /// One `## [...]` section.
 #[derive(Debug, Clone)]
@@ -119,8 +131,16 @@ impl Changelog {
             target.push_str(line);
             target.push('\n');
         }
-        if !sections.iter().any(|s| s.heading == Heading::Unreleased) {
-            bail!("CHANGELOG.md has no ## [Unreleased] section");
+        match sections
+            .iter()
+            .filter(|s| s.heading == Heading::Unreleased)
+            .count()
+        {
+            0 => bail!("CHANGELOG.md has no ## [Unreleased] section"),
+            1 => {}
+            _ => {
+                bail!("CHANGELOG.md has more than one ## [Unreleased] section; merge them into one")
+            }
         }
         Ok(Changelog {
             preamble,
@@ -199,6 +219,99 @@ impl Changelog {
         Ok(next)
     }
 
+    /// What is inconsistent within the changelog, or between it, the
+    /// workspace `version` and `repo`. Empty when all is well.
+    #[must_use]
+    pub fn problems(&self, version: &Version, repo: &str) -> Vec<String> {
+        let mut problems = Vec::new();
+        if self.sections.first().map(|s| &s.heading) != Some(&Heading::Unreleased) {
+            problems.push("## [Unreleased] must be the first section".to_owned());
+        }
+        let releases: Vec<(&Version, &str)> = self
+            .sections
+            .iter()
+            .filter_map(|s| match &s.heading {
+                Heading::Release { version, date } => Some((version, date.as_str())),
+                Heading::Unreleased => None,
+            })
+            .collect();
+        for section in &self.sections {
+            let label = match &section.heading {
+                Heading::Unreleased => "Unreleased".to_owned(),
+                Heading::Release { version, .. } => version.to_string(),
+            };
+            for category in section.categories() {
+                if !CATEGORIES.contains(&category) {
+                    problems.push(format!(
+                        "## [{label}] has an unknown category ### {category}; use one of {}",
+                        CATEGORIES.join(", ")
+                    ));
+                }
+            }
+        }
+        let mut seen = BTreeSet::new();
+        for (v, date) in &releases {
+            if !seen.insert(*v) {
+                problems.push(format!("## [{v}] appears more than once"));
+            }
+            // Keep a Changelog marks a withdrawn release `[YANKED]`.
+            let day = date.strip_suffix("[YANKED]").map_or(*date, str::trim_end);
+            if !is_iso_date(day) {
+                problems.push(format!("## [{v}] is dated {date:?}; use YYYY-MM-DD"));
+            }
+        }
+        for pair in releases.windows(2) {
+            let (newer, older) = (pair[0].0, pair[1].0);
+            if newer < older {
+                problems.push(format!(
+                    "releases must run newest first, but [{newer}] comes before [{older}]"
+                ));
+            }
+        }
+        let latest = self.latest_release();
+        if let Some(latest) = &latest
+            && latest != version
+        {
+            problems.push(format!(
+                "the latest release in CHANGELOG.md is {latest}, but Cargo.toml says {version}"
+            ));
+        }
+        let unreleased = match &latest {
+            Some(latest) => format!("{repo}/compare/v{latest}...HEAD"),
+            None => format!("{repo}/commits/main"),
+        };
+        match self.link("Unreleased") {
+            None => problems.push(format!(
+                "[Unreleased] has no link; add [Unreleased]: {unreleased}"
+            )),
+            Some(url) if url != unreleased => problems.push(format!(
+                "[Unreleased] links to {url}; it should be {unreleased}"
+            )),
+            Some(_) => {}
+        }
+        for (i, (v, _)) in releases.iter().enumerate() {
+            let expected = match releases.get(i + 1) {
+                Some((older, _)) => format!("{repo}/compare/v{older}...v{v}"),
+                None => format!("{repo}/releases/tag/v{v}"),
+            };
+            match self.link(&v.to_string()) {
+                None => problems.push(format!("[{v}] has no link; add [{v}]: {expected}")),
+                Some(url) if url != expected => {
+                    problems.push(format!("[{v}] links to {url}; it should be {expected}"));
+                }
+                Some(_) => {}
+            }
+        }
+        problems
+    }
+
+    fn link(&self, label: &str) -> Option<&str> {
+        self.links
+            .iter()
+            .find(|(l, _)| l == label)
+            .map(|(_, url)| url.as_str())
+    }
+
     /// The changelog with the unreleased entries released as `version`
     /// on `date`, a fresh empty `[Unreleased]`, and compare links for
     /// `repo` (e.g. `https://github.com/owner/name`).
@@ -266,6 +379,34 @@ fn workspace_version_line(toml: &str) -> Result<(usize, &str)> {
         }
     }
     bail!("no version under [workspace.package] in Cargo.toml")
+}
+
+/// Whether `s` is a real calendar date written YYYY-MM-DD.
+fn is_iso_date(s: &str) -> bool {
+    let parts: Vec<&str> = s.split('-').collect();
+    let [year, month, day] = parts.as_slice() else {
+        return false;
+    };
+    let digits = |p: &str, n: usize| p.len() == n && p.bytes().all(|b| b.is_ascii_digit());
+    if !(digits(year, 4) && digits(month, 2) && digits(day, 2)) {
+        return false;
+    }
+    let (Ok(year), Ok(month), Ok(day)) = (
+        year.parse::<u32>(),
+        month.parse::<u32>(),
+        day.parse::<u32>(),
+    ) else {
+        return false;
+    };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=days).contains(&day)
 }
 
 #[cfg(test)]

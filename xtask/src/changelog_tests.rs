@@ -173,3 +173,166 @@ fn setting_the_workspace_version() {
 fn a_manifest_without_a_workspace_version_is_an_error() {
     assert!(workspace_version("[workspace]\nmembers = []\n").is_err());
 }
+
+fn problems(text: &str, version: &str) -> Vec<String> {
+    Changelog::parse(text).unwrap().problems(&v(version), REPO)
+}
+
+#[test]
+fn a_consistent_changelog_has_no_problems() {
+    assert_eq!(problems(FIRST, "0.1.0"), Vec::<String>::new());
+    assert_eq!(problems(LATER, "0.1.0"), Vec::<String>::new());
+}
+
+#[test]
+fn a_cut_changelog_is_consistent() {
+    for (text, next) in [(FIRST, "0.1.0"), (LATER, "0.1.1")] {
+        let out = Changelog::parse(text)
+            .unwrap()
+            .cut(&v(next), "2026-11-01", REPO)
+            .unwrap();
+        assert_eq!(problems(&out, next), Vec::<String>::new(), "{out}");
+    }
+}
+
+#[test]
+fn the_latest_release_must_match_the_manifest() {
+    let p = problems(LATER, "0.2.0");
+    assert_eq!(p.len(), 1, "{p:?}");
+    assert!(p[0].contains("0.1.0") && p[0].contains("0.2.0"), "{p:?}");
+}
+
+#[test]
+fn every_section_needs_its_link() {
+    let unlinked = LATER.replace(
+        "[0.1.0]: https://github.com/jamesainslie/camctl/releases/tag/v0.1.0\n",
+        "",
+    );
+    let p = problems(&unlinked, "0.1.0");
+    assert!(p.iter().any(|m| m.contains("[0.1.0]")), "{p:?}");
+}
+
+#[test]
+fn the_unreleased_link_compares_against_the_latest_release() {
+    let stale = LATER.replace("compare/v0.1.0...HEAD", "commits/main");
+    let p = problems(&stale, "0.1.0");
+    assert!(
+        p.iter().any(|m| m.contains("compare/v0.1.0...HEAD")),
+        "{p:?}"
+    );
+    let early = FIRST.replace("commits/main", "compare/v0.0.1...HEAD");
+    let p = problems(&early, "0.1.0");
+    assert!(p.iter().any(|m| m.contains("commits/main")), "{p:?}");
+}
+
+#[test]
+fn releases_run_newest_first_without_repeats() {
+    let older_first = LATER.replace(
+        "## [0.1.0] - 2026-10-17\n\n### Added\n\n- The app.\n",
+        "## [0.1.0] - 2026-10-17\n\n### Added\n\n- The app.\n\n## [0.2.0] - 2026-11-01\n\n- Later.\n",
+    );
+    let p = problems(&older_first, "0.2.0");
+    assert!(p.iter().any(|m| m.contains("newest first")), "{p:?}");
+
+    let repeated = LATER.replace(
+        "## [0.1.0] - 2026-10-17\n\n### Added\n\n- The app.\n",
+        "## [0.1.0] - 2026-10-17\n\n### Added\n\n- The app.\n\n## [0.1.0] - 2026-10-16\n\n- Again.\n",
+    );
+    let p = problems(&repeated, "0.1.0");
+    assert!(p.iter().any(|m| m.contains("more than once")), "{p:?}");
+}
+
+#[test]
+fn unreleased_comes_first() {
+    let late = "# Changelog\n\n## [0.1.0] - 2026-10-17\n\n- The app.\n\n## [Unreleased]\n\n\
+                [Unreleased]: https://github.com/jamesainslie/camctl/compare/v0.1.0...HEAD\n\
+                [0.1.0]: https://github.com/jamesainslie/camctl/releases/tag/v0.1.0\n";
+    let p = problems(late, "0.1.0");
+    assert!(p.iter().any(|m| m.contains("first section")), "{p:?}");
+}
+
+#[test]
+fn release_dates_are_iso_dates() {
+    for bad in ["17 Oct 2026", "2026-13-01", "2026-10-32", "2026-1-7", ""] {
+        let text = LATER.replace("2026-10-17", bad);
+        let p = problems(&text, "0.1.0");
+        assert!(p.iter().any(|m| m.contains("YYYY-MM-DD")), "{bad:?}: {p:?}");
+    }
+}
+
+#[test]
+fn a_second_unreleased_section_is_rejected() {
+    let twice = LATER.replace(
+        "## [0.1.0] - 2026-10-17\n",
+        "## [Unreleased]\n\n### Added\n\n- Lost in a rebase.\n\n## [0.1.0] - 2026-10-17\n",
+    );
+    let err = Changelog::parse(&twice).unwrap_err().to_string();
+    assert!(err.contains("more than one"), "{err}");
+}
+
+#[test]
+fn unknown_categories_are_problems() {
+    for bad in ["### Breaking changes", "### Features", "### added"] {
+        let text = LATER.replace("### Fixed", bad);
+        let p = problems(&text, "0.1.0");
+        assert!(
+            p.iter().any(|m| m.contains(bad.trim_start_matches("### "))),
+            "{bad}: {p:?}"
+        );
+    }
+    for good in [
+        "Added",
+        "Changed",
+        "Deprecated",
+        "Removed",
+        "Fixed",
+        "Security",
+    ] {
+        let text = LATER.replace("### Fixed", &format!("### {good}"));
+        assert_eq!(problems(&text, "0.1.0"), Vec::<String>::new(), "{good}");
+    }
+}
+
+#[test]
+fn a_wrong_release_link_is_a_problem() {
+    let wrong = LATER.replace("releases/tag/v0.1.0", "releases/tag/v0.0.1");
+    let p = problems(&wrong, "0.1.0");
+    assert!(p.iter().any(|m| m.contains("[0.1.0] links to")), "{p:?}");
+}
+
+#[test]
+fn a_missing_unreleased_link_is_a_problem() {
+    let unlinked = LATER.replace(
+        "[Unreleased]: https://github.com/jamesainslie/camctl/compare/v0.1.0...HEAD\n",
+        "",
+    );
+    let p = problems(&unlinked, "0.1.0");
+    assert!(
+        p.iter().any(|m| m.contains("[Unreleased] has no link")),
+        "{p:?}"
+    );
+}
+
+#[test]
+fn dates_are_real_calendar_dates() {
+    for bad in [
+        "2026-02-29",
+        "2026-02-31",
+        "2026-04-31",
+        "2026-00-10",
+        "2026-12-00",
+    ] {
+        let p = problems(&LATER.replace("2026-10-17", bad), "0.1.0");
+        assert!(p.iter().any(|m| m.contains("YYYY-MM-DD")), "{bad}: {p:?}");
+    }
+    for good in ["2024-02-29", "2026-02-28", "2026-12-31", "2000-02-29"] {
+        let p = problems(&LATER.replace("2026-10-17", good), "0.1.0");
+        assert_eq!(p, Vec::<String>::new(), "{good}");
+    }
+}
+
+#[test]
+fn a_yanked_release_keeps_a_valid_date() {
+    let yanked = LATER.replace("2026-10-17", "2026-10-17 [YANKED]");
+    assert_eq!(problems(&yanked, "0.1.0"), Vec::<String>::new());
+}

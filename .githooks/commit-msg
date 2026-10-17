@@ -1,0 +1,5 @@
+#!/bin/sh
+# camctl adds no commit message check. This runs the global commit-msg
+# hook, which the repository's hooksPath would otherwise hide.
+set -eu
+exec "$(dirname "$0")/run-global" commit-msg "$@"

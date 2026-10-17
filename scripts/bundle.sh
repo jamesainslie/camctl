@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# bundle.sh: build camctl.app into dist/ and sign it.
+# bundle.sh: build camctl.app and sign it.
 #
 # macOS grants camera access per signed app bundle, so the app must run
 # from a bundle with NSCameraUsageDescription. Signing with a stable
@@ -9,6 +9,7 @@
 # usage: scripts/bundle.sh [release|debug]
 #   CAMCTL_JOBS            cargo parallelism (default 3; unset on CI means
 #                          all cores)
+#   CAMCTL_BUNDLE_DIR      where to put camctl.app (default dist)
 #   CAMCTL_SIGN_IDENTITY   codesign identity (default "Apple Development")
 #                          "-"             ad-hoc (CI builds without secrets)
 #                          "Developer ID…" hardened runtime with the camera
@@ -25,14 +26,24 @@ identity="${CAMCTL_SIGN_IDENTITY:-Apple Development}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
+build_args=(build ${jobs_args[@]+"${jobs_args[@]}"} --locked -p camctl-app --message-format=json-render-diagnostics)
 case "$profile" in
-  release) cargo build ${jobs_args[@]+"${jobs_args[@]}"} --release -p camctl-app; bin=target/release/camctl-app ;;
-  debug) cargo build ${jobs_args[@]+"${jobs_args[@]}"} -p camctl-app; bin=target/debug/camctl-app ;;
+  release) build_args+=(--release) ;;
+  debug) ;;
   *) echo "bundle.sh: profile must be release or debug" >&2; exit 2 ;;
 esac
 
+# Take the binary's path from cargo's own report, so CARGO_TARGET_DIR,
+# build.target-dir and --target all lead to the file just built.
+artifacts="$(cargo "${build_args[@]}")"
+bin="$(sed -n 's/.*"executable":"\([^"]*\/camctl-app\)".*/\1/p' <<<"$artifacts" | tail -n 1)"
+if [[ -z "$bin" ]]; then
+  echo "bundle.sh: cargo reported no camctl-app executable" >&2
+  exit 1
+fi
+
 version="$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-app=dist/camctl.app
+app="${CAMCTL_BUNDLE_DIR:-dist}/camctl.app"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin" "$app/Contents/MacOS/camctl"

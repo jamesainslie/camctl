@@ -1,0 +1,6 @@
+#!/bin/sh
+# A fast format check before each commit, then the global pre-commit hook.
+# Installed by `cargo xtask install-hooks`.
+set -eu
+cargo fmt --all --check
+exec "$(dirname "$0")/run-global" pre-commit "$@"
