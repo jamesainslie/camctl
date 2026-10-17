@@ -1,0 +1,13 @@
+[package]
+name = "camctl-core"
+description = "camctl app logic: coalesced control writes and reads, smooth motion, camera quirks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+camctl-uvc.workspace = true
+
+[lints]
+workspace = true

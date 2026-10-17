@@ -1,0 +1,21 @@
+[package]
+name = "camctl-capture"
+description = "AVFoundation camera capture delivering 420f CVPixelBuffers, one latest frame at a time"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+objc2 = { version = "0.6", features = ["exception"] }
+objc2-foundation = "0.3"
+objc2-av-foundation = { version = "0.3.2", features = ["objc2-core-media", "objc2-core-video", "dispatch2", "block2"] }
+objc2-core-media = { version = "0.3.2", features = ["objc2-core-video"] }
+objc2-core-video = "0.3.2"
+objc2-core-foundation = "0.3.2"
+dispatch2 = "0.3"
+block2 = "0.6"
+thiserror.workspace = true
+
+[lints]
+workspace = true

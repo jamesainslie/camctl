@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 camctl-uvc.workspace = true
 camctl-usb.workspace = true
+camctl-core.workspace = true
 clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 libc = "0.2"

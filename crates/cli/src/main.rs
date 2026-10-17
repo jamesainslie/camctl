@@ -31,20 +31,23 @@ enum Command {
     /// Read one control.
     Get { control: String },
     /// Set one control, for example `set zoom 40` or `set pan-tilt -20,5`.
-    /// Relative moves (`*-move`) keep going until you send a zero speed.
+    /// Relative moves (`*-move`) keep going until you send a zero direction,
+    /// for example `set pan-tilt-move 0,0,0,0`. Values are the camera's own:
+    /// some cameras (OBSBOT) turn left for a positive pan.
     Set {
         control: String,
         #[arg(allow_hyphen_values = true)]
         value: String,
     },
-    /// Point the camera: pan and tilt in degrees.
+    /// Point the camera: degrees right and up from centre, whichever way the
+    /// camera's own pan axis runs.
     Point {
         #[arg(allow_negative_numbers = true)]
         pan: f64,
         #[arg(allow_negative_numbers = true)]
         tilt: f64,
     },
-    /// Center the camera and zoom all the way out.
+    /// Centre the camera and zoom all the way out.
     Home,
 }
 
@@ -92,9 +95,10 @@ fn main() -> Result<()> {
             Ok(())
         }
         Command::Point { pan, tilt } => {
+            let sign = camctl_core::quirks::pan_sign(info.vendor_id);
             cam.set(
                 Control::PanTiltAbsolute,
-                Value::pan_tilt_from_degrees(pan, tilt)?,
+                Value::pan_tilt_from_degrees(pan * sign, tilt)?,
             )?;
             Ok(())
         }
