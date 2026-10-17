@@ -1,0 +1,65 @@
+name: checks
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  HOMEBREW_NO_ANALYTICS: "1"
+
+jobs:
+  changelog:
+    name: changelog updated
+    # Every PR that changes behaviour says so under ## [Unreleased]. Label a
+    # PR skip-changelog when it changes nothing user-visible.
+    if: >-
+      github.event_name == 'pull_request' &&
+      !contains(github.event.pull_request.labels.*.name, 'skip-changelog')
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: xtask
+      - name: Check CHANGELOG.md
+        run: cargo xtask changelog-check --base "origin/${{ github.base_ref }}"
+
+  ci:
+    name: fmt, clippy, test (macOS)
+    # The app and the capture code are macOS-only, so CI runs where they do.
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo xtask ci
+        run: cargo xtask ci
+      - name: Verify no uncommitted changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          git update-index -q --refresh
+          if [ -n "$(git status --porcelain --ignore-submodules)" ]; then
+            echo "::error::CI changed tracked files (formatting or Cargo.lock?)"
+            git status --porcelain=v1 --ignore-submodules
+            git --no-pager diff
+            exit 1
+          fi

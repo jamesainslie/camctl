@@ -7,19 +7,27 @@
 # rebuilds; an ad-hoc signature would ask again after every build.
 #
 # usage: scripts/bundle.sh [release|debug]
-#   CAMCTL_JOBS            cargo parallelism (default 3)
+#   CAMCTL_JOBS            cargo parallelism (default 3; unset on CI means
+#                          all cores)
 #   CAMCTL_SIGN_IDENTITY   codesign identity (default "Apple Development")
+#                          "-"             ad-hoc (CI builds without secrets)
+#                          "Developer ID…" hardened runtime with the camera
+#                                          entitlement, for notarization
 set -euo pipefail
 
 profile="${1:-release}"
-jobs="${CAMCTL_JOBS:-3}"
+if [[ -n "${CI:-}" && -z "${CAMCTL_JOBS:-}" ]]; then
+  jobs_args=()
+else
+  jobs_args=(-j "${CAMCTL_JOBS:-3}")
+fi
 identity="${CAMCTL_SIGN_IDENTITY:-Apple Development}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
 case "$profile" in
-  release) cargo build -j "$jobs" --release -p camctl-app; bin=target/release/camctl-app ;;
-  debug) cargo build -j "$jobs" -p camctl-app; bin=target/debug/camctl-app ;;
+  release) cargo build ${jobs_args[@]+"${jobs_args[@]}"} --release -p camctl-app; bin=target/release/camctl-app ;;
+  debug) cargo build ${jobs_args[@]+"${jobs_args[@]}"} -p camctl-app; bin=target/debug/camctl-app ;;
   *) echo "bundle.sh: profile must be release or debug" >&2; exit 2 ;;
 esac
 
@@ -49,6 +57,17 @@ cat > "$app/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-codesign --force --sign "$identity" --timestamp=none "$app"
+sign_args=(--force --sign "$identity")
+case "$identity" in
+  "Developer ID"*)
+    # Notarization needs the hardened runtime and a secure timestamp; the
+    # hardened runtime needs camera access declared.
+    sign_args+=(--options runtime --timestamp --entitlements scripts/camctl.entitlements)
+    ;;
+  *)
+    sign_args+=(--timestamp=none)
+    ;;
+esac
+codesign "${sign_args[@]}" "$app"
 codesign --verify --strict "$app"
 echo "$app"
