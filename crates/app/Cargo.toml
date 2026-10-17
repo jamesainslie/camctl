@@ -1,0 +1,28 @@
+[package]
+name = "camctl-app"
+description = "camctl menu bar app: floating live preview and camera controls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "camctl-app"
+path = "src/main.rs"
+
+[dependencies]
+camctl-uvc.workspace = true
+camctl-usb.workspace = true
+camctl-capture.workspace = true
+camctl-core.workspace = true
+gpui-kit = "=0.7.3"
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["block2"] }
+objc2-app-kit = { version = "0.3", features = ["block2"] }
+block2 = "0.6"
+raw-window-handle = "0.6"
+futures = "0.3"
+anyhow = "1"
+
+[lints]
+workspace = true
