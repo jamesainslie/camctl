@@ -50,10 +50,13 @@ const SYNC_EVERY: Duration = Duration::from_secs(2);
 const SETTLE: Duration = Duration::from_millis(1500);
 /// How long the click marker stays.
 const MARKER_FOR: Duration = Duration::from_millis(600);
-/// A resumed stream that has sent no frame by now is restarted.
-const FIRST_FRAME_WITHIN: Duration = Duration::from_secs(4);
+/// A stream that delivers no frame for this long, at its start or later,
+/// is restarted.
+const STALL_AFTER: Duration = Duration::from_secs(4);
 /// Restarts before giving up: a quick stop and start, then rebuilds.
 const MAX_RESTARTS: u32 = 3;
+/// How long a rebuild waits for the old session to finish stopping.
+const IDLE_WITHIN: Duration = Duration::from_secs(5);
 /// Cell size of the on-video pad.
 const PAD_CELL: f32 = 30.0;
 
@@ -118,11 +121,13 @@ pub struct Preview {
     running: bool,
     /// The capture device, kept so a stuck session can be rebuilt.
     device: Option<camctl_capture::Device>,
-    /// Frames since the stream last (re)started, the restarts tried for
-    /// the current stall, and the timer that checks for a first frame.
-    frames_since_start: u64,
+    /// Frames delivered at the last liveness check, the restarts tried for
+    /// the current stall, the liveness timer, and whether a rebuild is
+    /// waiting for the old session to stop.
+    watch_delivered: u64,
     restarts: u32,
     watchdog: Option<Task<()>>,
+    rebuilding: bool,
     /// The window can be seen, and the user is not away (screen saver or
     /// lock screen). The camera streams only when both hold.
     visible: bool,
@@ -206,6 +211,10 @@ impl Preview {
                 }
             } else {
                 this.release_all(window, cx);
+                // Back to what the window server says, so a window covered
+                // later is still noticed.
+                this.visible = window.is_visible();
+                this.refresh_streaming(cx);
             }
         });
         // Stream only while the window can be seen: hidden, minimized,
@@ -253,9 +262,10 @@ impl Preview {
             events,
             running: false,
             device: None,
-            frames_since_start: 0,
+            watch_delivered: 0,
             restarts: 0,
             watchdog: None,
+            rebuilding: false,
             visible: true,
             away,
             tasks: vec![frames, results],
@@ -320,11 +330,31 @@ impl Preview {
     /// A new capture session for the device, configured and started if the
     /// window is up and the user is here. Returns whether it was built.
     fn build_session(&mut self, cx: &mut Context<Self>) -> bool {
-        let Some(device) = self.device.clone() else {
+        let built = self.try_build_session(cx);
+        cx.notify();
+        built
+    }
+
+    fn try_build_session(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(old) = self.device.clone() else {
             return false;
         };
+        // Look the camera up again: if it reconnected (during sleep, say)
+        // the old handle is dead.
+        let Some(device) = camctl_capture::devices()
+            .into_iter()
+            .find(|d| d.unique_id == old.unique_id)
+        else {
+            trace("camera no longer connected");
+            self.session = None;
+            self.running = false;
+            self.status = Status::NoCamera;
+            return false;
+        };
+        self.device = Some(device.clone());
         // Drop any old session first: its drop stops it and waits for its
-        // queue, so the camera is free for the new one.
+        // queue, so the camera is free for the new one. Callers make sure
+        // that queue is idle, so this does not block.
         self.session = None;
         self.running = false;
         let wake = self.wake.clone();
@@ -348,6 +378,9 @@ impl Preview {
                 self.status = Status::Starting;
                 // Start only if the window is up and the user is here.
                 self.refresh_streaming(cx);
+                if !self.running {
+                    self.status = Status::Paused(self.pause_reason());
+                }
                 true
             }
             Err(e) => {
@@ -358,44 +391,104 @@ impl Preview {
         }
     }
 
-    /// No frame since the stream started: restart it, then rebuild it, then
-    /// say so.
-    fn check_first_frame(&mut self, cx: &mut Context<Self>) {
-        if !self.running || self.frames_since_start > 0 {
-            return;
+    /// While streaming, check that frames keep arriving; on a stall,
+    /// restart, then rebuild, then give up and say so. Returns whether to
+    /// keep watching.
+    fn check_liveness(&mut self, cx: &mut Context<Self>) -> bool {
+        if !self.running || self.rebuilding {
+            return false;
+        }
+        let Some(session) = &self.session else {
+            return false;
+        };
+        let delivered = session.frames_delivered();
+        if delivered > self.watch_delivered {
+            self.watch_delivered = delivered;
+            self.restarts = 0;
+            return true;
         }
         if self.restarts >= MAX_RESTARTS {
             trace("no frames after restarting; giving up");
+            // Stop, so the camera light goes off; the next resume (showing
+            // the window again, say) tries afresh.
+            session.stop();
+            self.running = false;
+            self.restarts = 0;
+            self.frame = None;
             self.status = Status::Failed(
                 "The camera sends no video. Unplug it and plug it back in, or quit the app using it."
                     .into(),
             );
             cx.notify();
-            return;
+            return false;
         }
         self.restarts += 1;
         trace(&format!(
-            "no frames {}s after starting; restart {} of {MAX_RESTARTS}",
-            FIRST_FRAME_WITHIN.as_secs(),
+            "no frames for {}s; restart {} of {MAX_RESTARTS}",
+            STALL_AFTER.as_secs(),
             self.restarts
         ));
-        if self.restarts == 1
-            && let Some(session) = &self.session
-        {
+        if self.restarts == 1 {
             session.stop();
-            session.restart();
-            self.frames_since_start = 0;
-            self.arm_watchdog(cx);
+            session.start_fresh();
+            self.watch_delivered = session.frames_delivered();
+            true
         } else {
-            // A fresh session; its resume arms the watchdog again.
-            self.build_session(cx);
+            self.rebuild(cx);
+            false
         }
     }
 
+    /// Replace a stuck session without blocking the UI: stop it, wait (off
+    /// the UI thread, with a timeout) for its queue to finish, then build a
+    /// new one.
+    fn rebuild(&mut self, cx: &mut Context<Self>) {
+        let Some(session) = &self.session else {
+            self.build_session(cx);
+            return;
+        };
+        self.rebuilding = true;
+        session.stop();
+        let (tx, rx) = futures::channel::oneshot::channel::<()>();
+        session.when_idle(move || {
+            let _ = tx.send(());
+        });
+        let task = cx.spawn(async move |this, cx| {
+            let timeout = cx.background_executor().timer(IDLE_WITHIN);
+            let idle = matches!(
+                futures::future::select(rx, Box::pin(timeout)).await,
+                futures::future::Either::Left((Ok(()), _))
+            );
+            let _ = this.update(cx, |this, cx| {
+                this.rebuilding = false;
+                if idle {
+                    this.build_session(cx);
+                } else {
+                    trace("camera did not stop; giving up");
+                    this.running = false;
+                    this.status = Status::Failed(
+                        "The camera stopped responding. Unplug it and plug it back in.".into(),
+                    );
+                    cx.notify();
+                }
+            });
+        });
+        self.tasks.push(task);
+    }
+
+    /// Watch the stream for stalls while it runs. Replacing the task
+    /// cancels the previous watch (async-task allows a running task to
+    /// drop its own handle; it finishes its current step).
     fn arm_watchdog(&mut self, cx: &mut Context<Self>) {
+        self.watch_delivered = self.session.as_ref().map_or(0, Session::frames_delivered);
         self.watchdog = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(FIRST_FRAME_WITHIN).await;
-            let _ = this.update(cx, Preview::check_first_frame);
+            loop {
+                cx.background_executor().timer(STALL_AFTER).await;
+                let keep = this.update(cx, Preview::check_liveness).unwrap_or(false);
+                if !keep {
+                    break;
+                }
+            }
         }));
     }
 
@@ -458,7 +551,7 @@ impl Preview {
             if let QueueEvent::Wrote(w) = &event
                 && let Err(e) = &w.result
             {
-                eprintln!("camctl: {} = {:?} failed: {e}", w.control.key(), w.value);
+                trace(&format!("{} = {:?} failed: {e}", w.control.key(), w.value));
             }
             let _ = events.unbounded_send(event);
         }));
@@ -539,11 +632,8 @@ impl Preview {
             return;
         };
         self.frame = Some(frame);
-        self.frames_since_start += 1;
         if self.status != Status::Live {
             self.status = Status::Live;
-            self.restarts = 0;
-            self.watchdog = None;
             trace("first frame");
             cx.emit(PreviewEvent::Live(true));
         }
@@ -567,10 +657,16 @@ impl Preview {
     fn refresh_streaming(&mut self, cx: &mut Context<Self>) {
         if self.visible && !self.away {
             self.resume(cx);
-        } else if self.away {
-            self.pause("Paused while the screen saver or lock screen is up.", cx);
         } else {
-            self.pause("Paused while the window is hidden or covered.", cx);
+            self.pause(self.pause_reason(), cx);
+        }
+    }
+
+    fn pause_reason(&self) -> &'static str {
+        if self.away {
+            "Paused while the screen saver or lock screen is up."
+        } else {
+            "Paused while the window is hidden or covered."
         }
     }
 
@@ -585,6 +681,8 @@ impl Preview {
         session.stop();
         self.running = false;
         self.watchdog = None;
+        // A stall interrupted by a pause starts its restarts afresh.
+        self.restarts = 0;
         // Don't show a stale picture when the window comes back.
         self.frame = None;
         let was_live = self.status == Status::Live;
@@ -605,10 +703,9 @@ impl Preview {
         if self.running {
             return;
         }
-        session.restart();
+        session.start_fresh();
         self.running = true;
-        self.frames_since_start = 0;
-        if matches!(self.status, Status::Paused(_)) {
+        if matches!(self.status, Status::Paused(_) | Status::Failed(_)) {
             self.status = Status::Starting;
         }
         self.arm_watchdog(cx);
@@ -1333,5 +1430,18 @@ impl Render for Preview {
             )
             .child(video)
             .children(bar)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::degrees;
+
+    #[test]
+    fn degrees_never_show_minus_zero() {
+        assert_eq!(degrees(-0.4), "0°");
+        assert_eq!(degrees(0.0), "0°");
+        assert_eq!(degrees(-1.6), "-2°");
+        assert_eq!(degrees(12.5), "13°");
     }
 }

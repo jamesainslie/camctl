@@ -27,6 +27,7 @@ impl<T> Default for LatestSlot<T> {
 impl<T> LatestSlot<T> {
     /// Store `item`, dropping any older one. Returns `true` when the slot
     /// was empty, which is when the consumer must be woken.
+    #[must_use = "wake the consumer when this returns true"]
     pub fn put(&self, item: T) -> bool {
         self.item
             .lock()
@@ -67,7 +68,7 @@ mod tests {
     #[test]
     fn taking_re_arms_the_wake() {
         let slot = LatestSlot::default();
-        slot.put(1);
+        let _ = slot.put(1);
         assert_eq!(slot.take(), Some(1));
         assert!(slot.put(2), "the next frame wakes the consumer again");
         assert_eq!(slot.take(), Some(2));

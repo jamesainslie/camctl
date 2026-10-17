@@ -3,8 +3,9 @@
 //! be diagnosed afterwards. It records transitions only, never per-frame
 //! events, so it stays tiny.
 //!
-//! Lines go to `~/Library/Logs/camctl/camctl.log` (trimmed when it passes
-//! 1 MB) and, with `CAMCTL_TRACE=1`, to stderr as well.
+//! Lines go to `~/Library/Logs/camctl/camctl.log` (moved to `camctl.log.1`
+//! when it passes 1 MB, so the history before a problem survives) and,
+//! with `CAMCTL_TRACE=1`, to stderr as well.
 
 use std::fs::OpenOptions;
 use std::io::Write as _;
@@ -29,11 +30,15 @@ fn now() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     let secs = libc::time_t::try_from(since.as_secs()).unwrap_or_default();
-    // SAFETY: localtime_r writes only into the `tm` we pass, and `secs`
-    // lives for the call.
+    // SAFETY: an all-zero `tm` is valid (integers and a nullable pointer);
+    // localtime_r writes only into it and reads `secs`, which outlives the
+    // call. It reads TZ from the environment; camctl never changes its
+    // environment, so nothing races with that read.
     let tm = unsafe {
         let mut tm = std::mem::zeroed::<libc::tm>();
-        libc::localtime_r(&raw const secs, &raw mut tm);
+        if libc::localtime_r(&raw const secs, &raw mut tm).is_null() {
+            return format!("{}.{:03}", since.as_secs(), since.subsec_millis());
+        }
         tm
     };
     format!(
@@ -58,7 +63,8 @@ pub fn record(message: &str) {
         return;
     };
     if std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_BYTES) {
-        let _ = std::fs::remove_file(path);
+        // Best effort: if the rename fails the log just keeps growing.
+        let _ = std::fs::rename(path, path.with_extension("log.1"));
     }
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         // Logging is best effort; a full disk must not stop the camera.

@@ -1,8 +1,8 @@
 //! The AVFoundation side: devices, permission, and a capture session that
 //! keeps only the newest frame.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
@@ -464,17 +464,24 @@ impl Session {
 
     /// The newest frame, if one arrived since the last call. Emptying the
     /// slot re-arms the wake-up, so answer every wake with a call, even when
-    /// the frame will be thrown away (see [`crate::slot`]).
+    /// the frame will be thrown away.
     #[must_use]
     pub fn take_frame(&self) -> Option<Frame> {
         self.shared.latest.take()
     }
 
-    /// Start streaming afresh: drop a frame left over from before a stop,
-    /// so the first new frame wakes the consumer.
-    pub fn restart(&self) {
+    /// Start a stopped stream afresh: drop a frame left over from before
+    /// the stop, then start.
+    pub fn start_fresh(&self) {
         let _ = self.shared.latest.take();
         self.start();
+    }
+
+    /// Run `f` on the capture queue after everything already queued there
+    /// (a stop, say) has finished. Lets a caller wait for a stuck camera
+    /// without blocking its own thread.
+    pub fn when_idle(&self, f: impl FnOnce() + Send + 'static) {
+        self.queue.exec_async(f);
     }
 
     /// Frames delivered by AVFoundation since the session was built.
