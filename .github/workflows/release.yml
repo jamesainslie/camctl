@@ -10,32 +10,41 @@ concurrency:
   group: release
   cancel-in-progress: false
 
-permissions:
-  contents: write
+permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
-  HOMEBREW_NO_ANALYTICS: "1"
+  RUST_BACKTRACE: "1"
+  # Backtraces for panics only, not for every xtask error.
+  RUST_LIB_BACKTRACE: "0"
 
 jobs:
   release:
+    name: build and publish the release
     runs-on: macos-15
     timeout-minutes: 60
+    permissions:
+      contents: write # create the GitHub release and upload its assets
     env:
       # Developer ID signing and notarization run only when these secrets
       # exist; without them the app is ad-hoc signed.
       HAS_SIGNING: ${{ secrets.APPLE_DEVELOPER_ID_P12 != '' }}
       HAS_NOTARY: ${{ secrets.APPLE_APP_PASSWORD != '' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           fetch-tags: true
+          persist-credentials: false
 
+      # No build cache: a release builds from the tagged sources alone.
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Install the tools pinned in mise.toml
+        uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          cache: false
 
       - name: Verify the tag matches Cargo.toml and CHANGELOG.md
         run: cargo xtask verify-tag "$GITHUB_REF_NAME"

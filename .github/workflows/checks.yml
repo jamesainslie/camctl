@@ -1,11 +1,17 @@
 name: checks
 
+# Every job runs a `cargo xtask` task, so each check can be run locally
+# exactly as CI runs it. `cargo xtask ci` runs them all.
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, labeled, unlabeled]
+  schedule:
+    # Weekly, so advisories against unchanged dependencies still surface.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
 
 concurrency:
   group: checks-${{ github.ref }}
@@ -16,9 +22,30 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  HOMEBREW_NO_ANALYTICS: "1"
+  RUST_BACKTRACE: "1"
+  # Backtraces for panics only, not for every xtask error.
+  RUST_LIB_BACKTRACE: "0"
 
 jobs:
+  lint:
+    name: lint (format, rules, workflows, scripts, dependencies)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          shared-key: xtask
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install the tools pinned in mise.toml
+        uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+      - name: cargo xtask lint
+        run: cargo xtask lint
+
   changelog:
     name: changelog updated
     # Every PR that changes behaviour says so under ## [Unreleased]. Label a
@@ -29,37 +56,74 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           shared-key: xtask
+          save-if: false
       - name: Check CHANGELOG.md
-        run: cargo xtask changelog-check --base "origin/${{ github.base_ref }}"
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: cargo xtask changelog-check --base "origin/$BASE_REF"
 
-  ci:
-    name: fmt, clippy, test (macOS)
-    # The app and the capture code are macOS-only, so CI runs where they do.
+  check:
+    name: clippy, rustdoc, tests, smoke (macOS)
+    # The app and the capture code are macOS-only, so they build where they
+    # run. Waiting for lint keeps a formatting slip from spending macOS
+    # minutes.
+    needs: lint
+    if: github.event_name != 'schedule'
     runs-on: macos-15
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
-      - uses: Swatinem/rust-cache@v2
-      - name: cargo xtask ci
-        run: cargo xtask ci
-      - name: Verify no uncommitted changes
-        shell: bash
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: cargo xtask check
+        run: cargo xtask check
+      - name: Verify no tracked files changed
         run: |
           set -euo pipefail
           git update-index -q --refresh
           if [ -n "$(git status --porcelain --ignore-submodules)" ]; then
-            echo "::error::CI changed tracked files (formatting or Cargo.lock?)"
+            echo "::error::the checks changed tracked files (Cargo.lock?)"
             git status --porcelain=v1 --ignore-submodules
             git --no-pager diff
             exit 1
           fi
+
+  # The one check to require in branch protection: it fails if any job
+  # above failed or was cancelled, and passes when a job was skipped on
+  # purpose (the changelog check outside PRs, the macOS job on schedule).
+  checks:
+    name: checks passed
+    if: always()
+    needs: [lint, changelog, check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every job to pass or be skipped
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          set -euo pipefail
+          echo "job results: $RESULTS"
+          for result in $RESULTS; do
+            case "$result" in
+              success | skipped) ;;
+              *)
+                echo "::error::a required job finished as $result"
+                exit 1
+                ;;
+            esac
+          done

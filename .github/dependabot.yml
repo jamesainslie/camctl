@@ -1,0 +1,14 @@
+# Keeps the SHA-pinned actions in the workflows current. Cargo
+# dependencies are pinned by Cargo.lock and audited by cargo-deny.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    labels: [dependencies, skip-changelog]
+    groups:
+      actions:
+        patterns: ["*"]
