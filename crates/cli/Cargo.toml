@@ -1,0 +1,21 @@
+[package]
+name = "camctl-cli"
+description = "camctl command line: list, inspect and drive UVC camera controls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "camctl"
+path = "src/main.rs"
+
+[dependencies]
+camctl-uvc.workspace = true
+camctl-usb.workspace = true
+clap = { version = "4", features = ["derive"] }
+anyhow = "1"
+libc = "0.2"
+
+[lints]
+workspace = true
