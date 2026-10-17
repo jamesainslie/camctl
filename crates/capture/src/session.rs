@@ -2,7 +2,7 @@
 //! keeps only the newest frame.
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 
 use block2::RcBlock;
 use dispatch2::{DispatchQueue, DispatchQueueAttr, DispatchRetained};
@@ -26,6 +26,7 @@ use objc2_core_video::{
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 
 use crate::policy::{Candidate, Encoding, Want, choose};
+use crate::slot::LatestSlot;
 
 /// Why capture could not start.
 #[derive(Debug, thiserror::Error)]
@@ -222,7 +223,7 @@ pub fn devices() -> Vec<Device> {
 /// the consumer only when it fills an empty slot, and the consumer empties
 /// it in one locked step, so no frame is ever left without a wake-up.
 struct Shared {
-    latest: Mutex<Option<Frame>>,
+    latest: LatestSlot<Frame>,
     delivered: AtomicU64,
     wake: Box<dyn Fn() + Send + Sync>,
 }
@@ -273,12 +274,7 @@ define_class!(
                 return;
             }
             let shared = self.ivars();
-            let was_empty = shared
-                .latest
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .replace(Frame(buffer))
-                .is_none();
+            let was_empty = shared.latest.put(Frame(buffer));
             shared.delivered.fetch_add(1, Ordering::Relaxed);
             if was_empty {
                 (shared.wake)();
@@ -359,7 +355,7 @@ impl Session {
             return Err(CaptureError::NotAuthorized);
         }
         let shared = Arc::new(Shared {
-            latest: Mutex::new(None),
+            latest: LatestSlot::default(),
             delivered: AtomicU64::new(0),
             wake: Box::new(wake),
         });
@@ -467,14 +463,18 @@ impl Session {
     }
 
     /// The newest frame, if one arrived since the last call. Emptying the
-    /// slot re-arms the wake-up.
+    /// slot re-arms the wake-up, so answer every wake with a call, even when
+    /// the frame will be thrown away (see [`crate::slot`]).
     #[must_use]
     pub fn take_frame(&self) -> Option<Frame> {
-        self.shared
-            .latest
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
+        self.shared.latest.take()
+    }
+
+    /// Start streaming afresh: drop a frame left over from before a stop,
+    /// so the first new frame wakes the consumer.
+    pub fn restart(&self) {
+        let _ = self.shared.latest.take();
+        self.start();
     }
 
     /// Frames delivered by AVFoundation since the session was built.

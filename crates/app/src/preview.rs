@@ -50,6 +50,10 @@ const SYNC_EVERY: Duration = Duration::from_secs(2);
 const SETTLE: Duration = Duration::from_millis(1500);
 /// How long the click marker stays.
 const MARKER_FOR: Duration = Duration::from_millis(600);
+/// A resumed stream that has sent no frame by now is restarted.
+const FIRST_FRAME_WITHIN: Duration = Duration::from_secs(4);
+/// Restarts before giving up: a quick stop and start, then rebuilds.
+const MAX_RESTARTS: u32 = 3;
 /// Cell size of the on-video pad.
 const PAD_CELL: f32 = 30.0;
 
@@ -65,6 +69,8 @@ enum Status {
     Denied,
     NoCamera,
     Starting,
+    /// Deliberately not streaming, and why.
+    Paused(&'static str),
     Live,
     Failed(SharedString),
 }
@@ -110,6 +116,13 @@ pub struct Preview {
     wake: UnboundedSender<()>,
     events: UnboundedSender<QueueEvent>,
     running: bool,
+    /// The capture device, kept so a stuck session can be rebuilt.
+    device: Option<camctl_capture::Device>,
+    /// Frames since the stream last (re)started, the restarts tried for
+    /// the current stall, and the timer that checks for a first frame.
+    frames_since_start: u64,
+    restarts: u32,
+    watchdog: Option<Task<()>>,
     /// The window can be seen, and the user is not away (screen saver or
     /// lock screen). The camera streams only when both hold.
     visible: bool,
@@ -120,11 +133,8 @@ pub struct Preview {
 
 impl EventEmitter<PreviewEvent> for Preview {}
 
-/// Startup tracing, on with `CAMCTL_TRACE=1`.
 fn trace(step: &str) {
-    if std::env::var_os("CAMCTL_TRACE").is_some() {
-        eprintln!("camctl: {step}");
-    }
+    crate::events::record(step);
 }
 
 fn movement_key(key: &str) -> Option<&'static str> {
@@ -142,6 +152,12 @@ fn movement_key(key: &str) -> Option<&'static str> {
 /// Command, Control or Option: the key belongs to a shortcut, not to us.
 fn is_shortcut(m: Modifiers) -> bool {
     m.platform || m.control || m.alt
+}
+
+/// Whole degrees, without a "-0".
+fn degrees(v: f64) -> String {
+    let rounded = v.round();
+    format!("{}°", if rounded == 0.0 { 0.0 } else { rounded })
 }
 
 fn px_f64(p: Pixels) -> f64 {
@@ -180,7 +196,15 @@ impl Preview {
         // Never leave the camera moving when the window loses focus and its
         // key-up never arrives.
         let activation = cx.observe_window_activation(window, |this, window, cx| {
-            if !window.is_window_active() {
+            if window.is_window_active() {
+                // A window the user is using is visible, whatever the last
+                // occlusion report said.
+                if !this.visible {
+                    trace("window activated: treating it as visible");
+                    this.visible = true;
+                    this.refresh_streaming(cx);
+                }
+            } else {
                 this.release_all(window, cx);
             }
         });
@@ -189,7 +213,15 @@ impl Preview {
         let weak = cx.weak_entity();
         let visibility = window.observe_window_visibility(move |visibility, _, cx| {
             let _ = weak.update(cx, |this, cx| {
-                this.visible = visibility.is_visible();
+                let visible = visibility.is_visible();
+                if visible != this.visible {
+                    trace(if visible {
+                        "window became visible"
+                    } else {
+                        "window hidden or covered"
+                    });
+                }
+                this.visible = visible;
                 this.refresh_streaming(cx);
             });
         });
@@ -220,6 +252,10 @@ impl Preview {
             wake,
             events,
             running: false,
+            device: None,
+            frames_since_start: 0,
+            restarts: 0,
+            watchdog: None,
             visible: true,
             away,
             tasks: vec![frames, results],
@@ -269,8 +305,30 @@ impl Preview {
             return;
         };
         self.device_name = device.name.clone().into();
+        trace(&format!("camera {} [{}]", device.name, device.unique_id));
+        self.device = Some(device.clone());
+        if !self.build_session(cx) {
+            return;
+        }
+        if let Some(identity) = camctl_capture::usb_identity(&device.unique_id) {
+            trace("open_controls");
+            self.open_controls(identity, cx);
+        }
+        trace("camera open");
+    }
+
+    /// A new capture session for the device, configured and started if the
+    /// window is up and the user is here. Returns whether it was built.
+    fn build_session(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(device) = self.device.clone() else {
+            return false;
+        };
+        // Drop any old session first: its drop stops it and waits for its
+        // queue, so the camera is free for the new one.
+        self.session = None;
+        self.running = false;
         let wake = self.wake.clone();
-        match Session::new(device, move || {
+        match Session::new(&device, move || {
             let _ = wake.unbounded_send(());
         }) {
             Ok(session) => {
@@ -284,23 +342,61 @@ impl Preview {
                         c.encoding, c.width, c.height
                     )),
                     Ok(None) => trace("keeping the current format"),
-                    Err(e) => eprintln!("camctl: {e}"),
+                    Err(e) => trace(&format!("format not set: {e}")),
                 }
                 self.session = Some(session);
                 self.status = Status::Starting;
                 // Start only if the window is up and the user is here.
                 self.refresh_streaming(cx);
+                true
             }
             Err(e) => {
+                trace(&format!("capture session failed: {e}"));
                 self.status = Status::Failed(e.to_string().into());
-                return;
+                false
             }
         }
-        if let Some(identity) = camctl_capture::usb_identity(&device.unique_id) {
-            trace("open_controls");
-            self.open_controls(identity, cx);
+    }
+
+    /// No frame since the stream started: restart it, then rebuild it, then
+    /// say so.
+    fn check_first_frame(&mut self, cx: &mut Context<Self>) {
+        if !self.running || self.frames_since_start > 0 {
+            return;
         }
-        trace("camera open");
+        if self.restarts >= MAX_RESTARTS {
+            trace("no frames after restarting; giving up");
+            self.status = Status::Failed(
+                "The camera sends no video. Unplug it and plug it back in, or quit the app using it."
+                    .into(),
+            );
+            cx.notify();
+            return;
+        }
+        self.restarts += 1;
+        trace(&format!(
+            "no frames {}s after starting; restart {} of {MAX_RESTARTS}",
+            FIRST_FRAME_WITHIN.as_secs(),
+            self.restarts
+        ));
+        if self.restarts == 1
+            && let Some(session) = &self.session
+        {
+            session.stop();
+            session.restart();
+            self.frames_since_start = 0;
+            self.arm_watchdog(cx);
+        } else {
+            // A fresh session; its resume arms the watchdog again.
+            self.build_session(cx);
+        }
+    }
+
+    fn arm_watchdog(&mut self, cx: &mut Context<Self>) {
+        self.watchdog = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(FIRST_FRAME_WITHIN).await;
+            let _ = this.update(cx, Preview::check_first_frame);
+        }));
     }
 
     /// Pair the preview device with its USB device and take over control.
@@ -433,15 +529,22 @@ impl Preview {
     }
 
     fn take_frame(&mut self, cx: &mut Context<Self>) {
+        // Always empty the slot, even when paused: a frame left in it would
+        // stop every later frame from waking us.
+        let frame = self.session.as_ref().and_then(Session::take_frame);
         if !self.running {
             return;
         }
-        let Some(frame) = self.session.as_ref().and_then(Session::take_frame) else {
+        let Some(frame) = frame else {
             return;
         };
         self.frame = Some(frame);
+        self.frames_since_start += 1;
         if self.status != Status::Live {
             self.status = Status::Live;
+            self.restarts = 0;
+            self.watchdog = None;
+            trace("first frame");
             cx.emit(PreviewEvent::Live(true));
         }
         cx.notify();
@@ -449,6 +552,13 @@ impl Preview {
 
     /// The screen saver or lock screen came or went.
     pub fn set_away(&mut self, away: bool, cx: &mut Context<Self>) {
+        if away != self.away {
+            trace(if away {
+                "user away (screen saver or lock)"
+            } else {
+                "user back"
+            });
+        }
         self.away = away;
         self.refresh_streaming(cx);
     }
@@ -457,13 +567,15 @@ impl Preview {
     fn refresh_streaming(&mut self, cx: &mut Context<Self>) {
         if self.visible && !self.away {
             self.resume(cx);
+        } else if self.away {
+            self.pause("Paused while the screen saver or lock screen is up.", cx);
         } else {
-            self.pause(cx);
+            self.pause("Paused while the window is hidden or covered.", cx);
         }
     }
 
     /// Stop streaming: the camera light goes off and nothing runs.
-    fn pause(&mut self, cx: &mut Context<Self>) {
+    fn pause(&mut self, why: &'static str, cx: &mut Context<Self>) {
         let Some(session) = &self.session else {
             return;
         };
@@ -472,13 +584,17 @@ impl Preview {
         }
         session.stop();
         self.running = false;
+        self.watchdog = None;
         // Don't show a stale picture when the window comes back.
         self.frame = None;
-        if self.status == Status::Live {
-            self.status = Status::Starting;
+        let was_live = self.status == Status::Live;
+        if matches!(self.status, Status::Live | Status::Starting) {
+            self.status = Status::Paused(why);
+        }
+        if was_live {
             cx.emit(PreviewEvent::Live(false));
         }
-        trace("paused");
+        trace(&format!("paused: {why}"));
         cx.notify();
     }
 
@@ -489,8 +605,13 @@ impl Preview {
         if self.running {
             return;
         }
-        session.start();
+        session.restart();
         self.running = true;
+        self.frames_since_start = 0;
+        if matches!(self.status, Status::Paused(_)) {
+            self.status = Status::Starting;
+        }
+        self.arm_watchdog(cx);
         trace("resumed");
         cx.notify();
     }
@@ -834,6 +955,7 @@ impl Preview {
         Some(match &self.status {
             Status::Live => return None,
             Status::Starting => (IconName::Video, "Starting the camera", "".into()),
+            Status::Paused(why) => (IconName::Video, "Paused", (*why).into()),
             Status::AskingPermission => (
                 IconName::Camera,
                 "Camera access",
@@ -1176,7 +1298,11 @@ impl Render for Preview {
                 }))
                 .child(div().flex_1())
                 .when(self.can_aim, |this| {
-                    this.child(format!("{:.0}°  {:.0}°", r.pan * r.pan_sign, r.tilt))
+                    this.child(format!(
+                        "{}  {}",
+                        degrees(r.pan * r.pan_sign),
+                        degrees(r.tilt)
+                    ))
                 })
                 .child(
                     div()

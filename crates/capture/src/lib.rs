@@ -4,6 +4,7 @@
 
 pub mod policy;
 mod session;
+pub mod slot;
 
 pub use session::{
     Authorization, CaptureError, Device, DeviceKind, Frame, Session, authorization, devices,

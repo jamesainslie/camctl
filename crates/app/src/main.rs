@@ -5,6 +5,7 @@
 
 mod assets;
 mod away;
+mod events;
 mod native;
 mod preview;
 mod status_item;
