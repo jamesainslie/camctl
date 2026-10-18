@@ -21,6 +21,7 @@ use camctl_uvc::{Control, Value};
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui_kit::assets::IconName;
+use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
 use gpui_kit::component::{ActiveTheme, Icon, Sizable, TitleBar, h_flex, v_flex};
 use gpui_kit::prelude::FluentBuilder as _;
@@ -67,10 +68,12 @@ const IDLE_WITHIN: Duration = Duration::from_secs(5);
 /// Cell size of the on-video pad.
 const PAD_CELL: f32 = 30.0;
 
-/// Emitted when frames start or stop flowing, for the menu bar icon.
+/// For the menu bar: frames started or stopped flowing, or the camera
+/// went to sleep or woke.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewEvent {
     Live(bool),
+    Asleep(bool),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -83,6 +86,22 @@ enum Status {
     Paused(&'static str),
     Live,
     Failed(SharedString),
+}
+
+/// Whether the user has put the camera to sleep.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Sleep {
+    Awake,
+    /// Lens down, not streaming, input ignored. `wake_aim` is the pan and
+    /// tilt to return to, once the camera has been parked.
+    Asleep {
+        wake_aim: Option<(f64, f64)>,
+    },
+    /// Woken, with the aim still to be sent again on the first frame. A
+    /// Tiny 2 Lite in its own sleep ignores pan and tilt until a stream
+    /// wakes it, then settles at a pose of its choosing. In testing, its
+    /// first frame came once it had settled, so one resend was enough.
+    Waking,
 }
 
 /// A press on the video that may become a drag.
@@ -139,6 +158,9 @@ pub struct Preview {
     /// lock screen). The camera streams only when both hold.
     visible: bool,
     away: bool,
+    sleep: Sleep,
+    /// Where this camera tilts to sleep, if not the bottom of its range.
+    sleep_tilt: Option<f64>,
     tasks: Vec<Task<()>>,
     subscriptions: Vec<Subscription>,
 }
@@ -275,6 +297,8 @@ impl Preview {
             rebuilding: false,
             visible: true,
             away,
+            sleep: Sleep::Awake,
+            sleep_tilt: None,
             tasks: vec![frames, results],
             subscriptions: vec![activation, visibility],
         };
@@ -553,6 +577,7 @@ impl Preview {
             self.zoom = Some(slider);
         }
         self.motion = Some(Motion::new(rig, SPEEDS, quirks::fov(vendor_id, product_id)));
+        self.sleep_tilt = quirks::sleep_tilt(vendor_id, product_id);
         let events = self.events.clone();
         self.queue = Some(ControlQueue::spawn(camera, move |event| {
             if let QueueEvent::Wrote(w) = &event
@@ -563,6 +588,12 @@ impl Preview {
             let _ = events.unbounded_send(event);
         }));
         trace("controls ready");
+        // Put to sleep before the controls were ready: park now.
+        if self.sleep == (Sleep::Asleep { wake_aim: None }) {
+            self.sleep = Sleep::Asleep {
+                wake_aim: self.park(),
+            };
+        }
         cx.notify();
     }
 
@@ -572,7 +603,9 @@ impl Preview {
         let QueueEvent::Read(read) = event else {
             return;
         };
-        if self.ticking || self.read_epoch != Some(self.writes) {
+        // Until the post-wake aim goes out, the camera may still report
+        // where it slept.
+        if self.ticking || self.sleep == Sleep::Waking || self.read_epoch != Some(self.writes) {
             return;
         }
         let Some(motion) = self.motion.as_mut() else {
@@ -643,6 +676,11 @@ impl Preview {
             self.status = Status::Live;
             trace("first frame");
             cx.emit(PreviewEvent::Live(true));
+            if self.sleep == Sleep::Waking {
+                self.sleep = Sleep::Awake;
+                trace("aiming again now the camera is awake");
+                self.send_aim();
+            }
         }
         cx.notify();
     }
@@ -660,9 +698,75 @@ impl Preview {
         self.refresh_streaming(cx);
     }
 
-    /// Stream exactly when the window can be seen and the user is here.
+    fn asleep(&self) -> bool {
+        matches!(self.sleep, Sleep::Asleep { .. })
+    }
+
+    /// Put the camera to sleep, or wake it.
+    pub fn toggle_sleep(&mut self, cx: &mut Context<Self>) {
+        if self.asleep() {
+            self.wake(cx);
+        } else {
+            self.sleep(cx);
+        }
+    }
+
+    /// Point the lens at the floor and stop camctl's stream. The camera
+    /// light goes off unless another app is streaming. Held input is
+    /// dropped and new input ignored until waking.
+    fn sleep(&mut self, cx: &mut Context<Self>) {
+        if self.asleep() {
+            return;
+        }
+        trace("camera asleep");
+        self.keys.clear();
+        self.button = None;
+        self.press = None;
+        self.marker = None;
+        // Stop held motion whatever the camera can do: parking only
+        // happens for a camera that aims.
+        if let Some(motion) = self.motion.as_mut() {
+            motion.set_stick(Stick::default());
+        }
+        self.sleep = Sleep::Asleep {
+            wake_aim: self.park(),
+        };
+        cx.emit(PreviewEvent::Asleep(true));
+        self.refresh_streaming(cx);
+    }
+
+    /// Aim where the camera pointed before sleep, and stream again if the
+    /// window can be seen and the user is here.
+    fn wake(&mut self, cx: &mut Context<Self>) {
+        let Sleep::Asleep { wake_aim } = self.sleep else {
+            return;
+        };
+        trace("camera awake");
+        self.sleep = Sleep::Awake;
+        if let (Some((pan, tilt)), Some(motion)) = (wake_aim, self.motion.as_mut()) {
+            let _ = motion.aim(pan, tilt);
+            self.send_aim();
+            self.sleep = Sleep::Waking;
+        }
+        cx.emit(PreviewEvent::Asleep(false));
+        self.refresh_streaming(cx);
+    }
+
+    /// Turn the lens down. Returns where it pointed before, or `None`
+    /// until the controls are ready and for a camera that cannot aim.
+    fn park(&mut self) -> Option<(f64, f64)> {
+        if !self.can_aim {
+            return None;
+        }
+        let was = self.motion.as_mut()?.park(self.sleep_tilt);
+        self.send_aim();
+        Some(was)
+    }
+
+    /// Stream exactly when the window can be seen, the user is here and
+    /// the camera is awake.
     fn refresh_streaming(&mut self, cx: &mut Context<Self>) {
-        if self.visible && !self.away {
+        if self.visible && !self.away && !self.asleep() {
             self.resume(cx);
         } else {
             self.pause(self.pause_reason(), cx);
@@ -670,7 +774,13 @@ impl Preview {
     }
 
     fn pause_reason(&self) -> &'static str {
-        if self.away {
+        if self.asleep() {
+            if self.can_aim {
+                "The lens faces down and camctl has stopped the camera."
+            } else {
+                "camctl has stopped the camera until you wake it."
+            }
+        } else if self.away {
             "Paused while the screen saver or lock screen is up."
         } else {
             "Paused while the window is hidden or covered."
@@ -679,6 +789,12 @@ impl Preview {
 
     /// Stop streaming: the camera light goes off and nothing runs.
     fn pause(&mut self, why: &'static str, cx: &mut Context<Self>) {
+        // Already stopped: keep the reason shown current (put to sleep
+        // while hidden, say).
+        if matches!(self.status, Status::Paused(old) if old != why) {
+            self.status = Status::Paused(why);
+            cx.notify();
+        }
         let Some(session) = &self.session else {
             return;
         };
@@ -710,6 +826,11 @@ impl Preview {
         if self.running {
             return;
         }
+        // A rebuild under way starts streaming itself once the new
+        // session is up; starting the old one would race it.
+        if self.rebuilding {
+            return;
+        }
         session.start_fresh();
         self.running = true;
         if matches!(self.status, Status::Paused(_) | Status::Failed(_)) {
@@ -721,6 +842,16 @@ impl Preview {
     }
 
     // --- Motion -------------------------------------------------------------
+
+    /// Send the rig's pan and tilt as they stand.
+    fn send_aim(&mut self) {
+        if let Some(r) = self.motion.as_ref().map(|m| *m.rig()) {
+            self.send(Targets {
+                pan_tilt: Some((r.pan, r.tilt)),
+                zoom: None,
+            });
+        }
+    }
 
     fn send(&mut self, targets: Targets) {
         let Some(queue) = &self.queue else {
@@ -847,6 +978,9 @@ impl Preview {
     }
 
     fn zoom_to(&mut self, zoom: f64, cx: &mut Context<Self>) {
+        if self.asleep() {
+            return;
+        }
         let Some(motion) = self.motion.as_mut() else {
             return;
         };
@@ -932,7 +1066,7 @@ impl Preview {
 
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let modifiers = &event.keystroke.modifiers;
-        if is_shortcut(*modifiers) {
+        if self.asleep() || is_shortcut(*modifiers) {
             return;
         }
         let raw = event.keystroke.key.as_str();
@@ -983,6 +1117,9 @@ impl Preview {
         cx: &mut Context<Self>,
     ) {
         window.focus(&self.focus, cx);
+        if self.asleep() {
+            return;
+        }
         self.press = Some(Press {
             start: event.position,
             dragging: false,
@@ -1042,7 +1179,7 @@ impl Preview {
             ScrollDelta::Lines(p) => f64::from(p.y) * ZOOM_PER_LINE,
             ScrollDelta::Pixels(p) => px_f64(p.y) * ZOOM_PER_PIXEL,
         };
-        if delta != 0.0 && self.can_zoom {
+        if delta != 0.0 && self.can_zoom && !self.asleep() {
             self.zoom_by(delta, window, cx);
             cx.stop_propagation();
         }
@@ -1056,6 +1193,14 @@ impl Preview {
     // --- Rendering ------------------------------------------------------------
 
     fn message(&self) -> Option<(IconName, &'static str, SharedString)> {
+        if self.asleep()
+            && matches!(
+                self.status,
+                Status::Paused(_) | Status::Failed(_) | Status::Starting
+            )
+        {
+            return Some((IconName::Moon, "Asleep", self.pause_reason().into()));
+        }
         Some(match &self.status {
             Status::Live => return None,
             Status::Starting => (IconName::Video, "Starting the camera", "".into()),
@@ -1090,6 +1235,30 @@ impl Preview {
                 cx.stop_propagation();
             }),
         )
+    }
+
+    /// Sleep while awake, Wake while asleep.
+    fn sleep_button(&self, cx: &mut Context<Self>) -> Button {
+        let (icon, label, tip) = if self.asleep() {
+            (
+                IconName::Sun,
+                "Wake",
+                "Aim the camera back and resume the preview",
+            )
+        } else {
+            (
+                IconName::Moon,
+                "Sleep",
+                "Point the camera down and stop the preview",
+            )
+        };
+        Button::new("sleep")
+            .ghost()
+            .xsmall()
+            .icon(icon)
+            .label(label)
+            .tooltip(tip)
+            .on_click(cx.listener(|this, _, _, cx| this.toggle_sleep(cx)))
     }
 
     fn pad(&self, cx: &mut Context<Self>) -> Div {
@@ -1298,7 +1467,7 @@ impl Render for Preview {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let live = self.status == Status::Live;
-        let interactive = self.motion.is_some();
+        let interactive = self.motion.is_some() && !self.asleep();
 
         let picture: AnyElement = match (&self.frame, self.message()) {
             (Some(frame), None) => surface(frame.pixel_buffer())
@@ -1408,11 +1577,14 @@ impl Render for Preview {
                         degrees(r.tilt)
                     ))
                 })
-                .child(
-                    div()
-                        .text_color(hsla(0., 0., 1., 0.35))
-                        .child("drag to look · click to aim · scroll to zoom"),
-                )
+                .when(!self.asleep(), |this| {
+                    this.child(
+                        div()
+                            .text_color(hsla(0., 0., 1., 0.35))
+                            .child("drag to look · click to aim · scroll to zoom"),
+                    )
+                })
+                .child(self.sleep_button(cx))
         });
 
         v_flex()

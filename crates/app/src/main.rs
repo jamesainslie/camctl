@@ -81,11 +81,16 @@ fn show_preview(cx: &mut App) {
         let opened = open_preview(cx);
         let live = opened.as_ref().map(|(_, preview)| {
             cx.subscribe(preview, |_, event: &PreviewEvent, cx| {
-                let PreviewEvent::Live(live) = *event;
-                cx.global::<Shell>().status.set_live(live);
+                let status = &cx.global::<Shell>().status;
+                match *event {
+                    PreviewEvent::Live(live) => status.set_live(live),
+                    PreviewEvent::Asleep(asleep) => status.set_asleep(asleep),
+                }
             })
         });
         let shell = cx.global_mut::<Shell>();
+        // A new preview starts awake.
+        shell.status.set_asleep(false);
         shell.preview = opened;
         shell.live_events = live;
     }
@@ -101,6 +106,11 @@ fn handle_status(event: StatusEvent, cx: &mut App) {
                 cx.hide();
             } else {
                 show_preview(cx);
+            }
+        }
+        StatusEvent::ToggleSleep => {
+            if let Some((_, preview)) = cx.global::<Shell>().preview.clone() {
+                preview.update(cx, Preview::toggle_sleep);
             }
         }
         StatusEvent::Quit => cx.quit(),

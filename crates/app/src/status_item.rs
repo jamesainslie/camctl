@@ -1,7 +1,8 @@
 //! The menu bar icon. GPUI has no status item support, so this is a thin
 //! AppKit layer: left click toggles the preview window, right click (or
-//! control-click) opens a native menu. Clicks become [`StatusEvent`]s on a
-//! channel that the GPUI side drains on its own executor.
+//! control-click) opens a native menu, which also puts the camera to sleep
+//! or wakes it. Clicks become [`StatusEvent`]s on a channel that the GPUI
+//! side drains on its own executor.
 //!
 //! The icon is drawn in code as a template image (a gimbal webcam), so it
 //! is crisp at any scale and follows the menu bar's light or dark look. The
@@ -24,6 +25,7 @@ use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, ns_string};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusEvent {
     TogglePreview,
+    ToggleSleep,
     Quit,
 }
 
@@ -64,6 +66,12 @@ define_class!(
         #[unsafe(method(togglePreview:))]
         fn toggle_preview(&self, _sender: Option<&AnyObject>) {
             self.send(StatusEvent::TogglePreview);
+        }
+
+        // SAFETY: as above.
+        #[unsafe(method(toggleSleep:))]
+        fn toggle_sleep(&self, _sender: Option<&AnyObject>) {
+            self.send(StatusEvent::ToggleSleep);
         }
 
         // SAFETY: as above.
@@ -181,6 +189,7 @@ pub struct StatusItem {
     item: Retained<NSStatusItem>,
     idle: Retained<NSImage>,
     live: Retained<NSImage>,
+    sleep: Retained<NSMenuItem>,
     _target: Retained<StatusTarget>,
 }
 
@@ -190,6 +199,19 @@ impl StatusItem {
         if let Some(button) = self.item.button(self.mtm) {
             button.setImage(Some(if live { &self.live } else { &self.idle }));
         }
+    }
+
+    /// Offer to wake the camera while it sleeps, and to sleep otherwise.
+    pub fn set_asleep(&self, asleep: bool) {
+        self.sleep.setTitle(sleep_title(asleep));
+    }
+}
+
+fn sleep_title(asleep: bool) -> &'static NSString {
+    if asleep {
+        ns_string!("Wake Camera")
+    } else {
+        ns_string!("Sleep Camera")
     }
 }
 
@@ -248,6 +270,14 @@ pub fn install(mtm: MainThreadMarker, tx: UnboundedSender<StatusEvent>) -> Statu
         ns_string!(""),
         &target,
     ));
+    let sleep = menu_item(
+        mtm,
+        sleep_title(false),
+        sel!(toggleSleep:),
+        ns_string!(""),
+        &target,
+    );
+    menu.addItem(&sleep);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&menu_item(
         mtm,
@@ -264,6 +294,7 @@ pub fn install(mtm: MainThreadMarker, tx: UnboundedSender<StatusEvent>) -> Statu
         item,
         idle,
         live,
+        sleep,
         _target: target,
     }
 }
