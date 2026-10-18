@@ -9,6 +9,14 @@ anything else bumps the patch; see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Added
+
+- Choosing the camera. A **Camera** submenu in the menu bar menu lists
+  the connected cameras, checks the one the preview shows, and switches
+  the preview and its controls to another. The choice is remembered
+  across launches; when the chosen camera is not connected, camctl falls
+  back to the first USB camera.
+
 ## [0.1.1] - 2026-10-18
 
 ### Added

@@ -29,6 +29,17 @@ pub fn usb_identity(unique_id: &str) -> Option<(u32, u16, u16)> {
     ))
 }
 
+/// Which of the cameras, given by unique ID in [`devices`] order, to
+/// preview: `preferred` if it is connected, otherwise the first USB camera,
+/// otherwise the first camera of any kind. `None` with no cameras.
+#[must_use]
+pub fn pick_camera(unique_ids: &[&str], preferred: Option<&str>) -> Option<usize> {
+    preferred
+        .and_then(|want| unique_ids.iter().position(|id| *id == want))
+        .or_else(|| unique_ids.iter().position(|id| usb_identity(id).is_some()))
+        .or_else(|| (!unique_ids.is_empty()).then_some(0))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -47,6 +58,33 @@ mod tests {
         assert_eq!(usb_identity("0x3564fef9"), None);
         assert_eq!(usb_identity("0xzz24003564fef9"), None);
         assert_eq!(usb_identity(""), None);
+    }
+
+    const BUILT_IN: &str = "6C707041-05AC-0010-0008-000000000001";
+    const OBSBOT: &str = "0x1224003564fef9";
+    const OTHER_USB: &str = "0x1100000046d085e";
+
+    #[test]
+    fn the_preferred_camera_wins_when_connected() {
+        let ids = [BUILT_IN, OBSBOT, OTHER_USB];
+        assert_eq!(pick_camera(&ids, Some(OTHER_USB)), Some(2));
+        assert_eq!(pick_camera(&ids, Some(BUILT_IN)), Some(0));
+    }
+
+    #[test]
+    fn without_a_preference_the_first_usb_camera_wins() {
+        assert_eq!(pick_camera(&[BUILT_IN, OBSBOT, OTHER_USB], None), Some(1));
+    }
+
+    #[test]
+    fn a_missing_preferred_camera_falls_back_to_the_default() {
+        assert_eq!(pick_camera(&[BUILT_IN, OBSBOT], Some(OTHER_USB)), Some(1));
+    }
+
+    #[test]
+    fn with_no_usb_camera_the_first_camera_wins() {
+        assert_eq!(pick_camera(&[BUILT_IN], None), Some(0));
+        assert_eq!(pick_camera(&[], Some(OBSBOT)), None);
     }
 
     #[test]

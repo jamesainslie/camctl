@@ -68,12 +68,13 @@ const IDLE_WITHIN: Duration = Duration::from_secs(5);
 /// Cell size of the on-video pad.
 const PAD_CELL: f32 = 30.0;
 
-/// For the menu bar: frames started or stopped flowing, or the camera
-/// went to sleep or woke.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// For the menu bar: frames started or stopped flowing, the camera went
+/// to sleep or woke, or the preview opened a camera (by unique ID).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreviewEvent {
     Live(bool),
     Asleep(bool),
+    Camera(SharedString),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -145,8 +146,12 @@ pub struct Preview {
     wake: UnboundedSender<()>,
     events: UnboundedSender<QueueEvent>,
     running: bool,
+    /// The camera to open, by unique ID, when it is connected.
+    preferred: Option<String>,
     /// The capture device, kept so a stuck session can be rebuilt.
     device: Option<camctl_capture::Device>,
+    /// Shut down for another camera: nothing may start the camera again.
+    closing: bool,
     /// Frames delivered at the last liveness check, the restarts tried for
     /// the current stall, the liveness timer, and whether a rebuild is
     /// waiting for the old session to stop.
@@ -200,7 +205,14 @@ fn px_f64(p: Pixels) -> f64 {
 
 impl Preview {
     /// `away` is whether the screen saver or lock screen is up right now.
-    pub fn new(away: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `preferred` is the unique ID of the camera to show, if connected;
+    /// without it (or without that camera) the first USB camera is shown.
+    pub fn new(
+        away: bool,
+        preferred: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (wake, mut woken) = unbounded::<()>();
         // Frames: the capture queue pokes `wake` once per pending frame;
         // take it here, on the UI thread, and redraw.
@@ -290,7 +302,9 @@ impl Preview {
             wake,
             events,
             running: false,
+            preferred,
             device: None,
+            closing: false,
             watch_delivered: 0,
             restarts: 0,
             watchdog: None,
@@ -335,12 +349,14 @@ impl Preview {
     }
 
     fn open_camera(&mut self, cx: &mut Context<Self>) {
+        if self.closing {
+            return;
+        }
         trace("open_camera");
         let devices = camctl_capture::devices();
-        let Some(device) = devices
-            .iter()
-            .find(|d| d.kind() == camctl_capture::DeviceKind::Usb)
-            .or_else(|| devices.first())
+        let ids: Vec<&str> = devices.iter().map(|d| d.unique_id.as_str()).collect();
+        let Some(device) = camctl_capture::pick_camera(&ids, self.preferred.as_deref())
+            .and_then(|i| devices.get(i))
         else {
             self.status = Status::NoCamera;
             return;
@@ -351,6 +367,7 @@ impl Preview {
         if !self.build_session(cx) {
             return;
         }
+        cx.emit(PreviewEvent::Camera(device.unique_id.clone().into()));
         if let Some(identity) = camctl_capture::usb_identity(&device.unique_id) {
             trace("open_controls");
             self.open_controls(identity, cx);
@@ -367,6 +384,9 @@ impl Preview {
     }
 
     fn try_build_session(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.closing {
+            return false;
+        }
         let Some(old) = self.device.clone() else {
             return false;
         };
@@ -685,6 +705,52 @@ impl Preview {
         cx.notify();
     }
 
+    /// The unique ID of the camera this preview shows. `None` while it
+    /// has no capture session: before the camera opens, after it failed,
+    /// or once it went away.
+    pub fn camera_id(&self) -> Option<&str> {
+        self.session.as_ref()?;
+        self.device.as_ref().map(|d| d.unique_id.as_str())
+    }
+
+    /// Stop the camera for good, so another can take over. The returned
+    /// receiver fires once the capture queue has finished stopping, after
+    /// which dropping this preview does not block.
+    ///
+    /// A sleeping camera is left parked: the user chose another camera,
+    /// not to wake this one.
+    pub fn shut_down(&mut self, cx: &mut Context<Self>) -> futures::channel::oneshot::Receiver<()> {
+        let (tx, rx) = futures::channel::oneshot::channel::<()>();
+        trace("closing for another camera");
+        self.closing = true;
+        self.watchdog = None;
+        // Dropping the control queue joins its worker, which may be in the
+        // middle of a USB transfer (up to its timeout), so drop it off the
+        // UI thread.
+        if let Some(queue) = self.queue.take() {
+            cx.background_spawn(async move { drop(queue) }).detach();
+        }
+        self.frame = None;
+        if self.status == Status::Live {
+            cx.emit(PreviewEvent::Live(false));
+        }
+        self.status = Status::Starting;
+        self.running = false;
+        match &self.session {
+            Some(session) => {
+                session.stop();
+                session.when_idle(move || {
+                    let _ = tx.send(());
+                });
+            }
+            None => {
+                let _ = tx.send(());
+            }
+        }
+        cx.notify();
+        rx
+    }
+
     /// The screen saver or lock screen came or went.
     pub fn set_away(&mut self, away: bool, cx: &mut Context<Self>) {
         if away != self.away {
@@ -828,7 +894,7 @@ impl Preview {
         }
         // A rebuild under way starts streaming itself once the new
         // session is up; starting the old one would race it.
-        if self.rebuilding {
+        if self.rebuilding || self.closing {
             return;
         }
         session.start_fresh();

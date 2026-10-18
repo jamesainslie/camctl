@@ -4,10 +4,14 @@ mod assets;
 mod away;
 mod events;
 mod native;
+mod prefs;
 mod preview;
 mod status_item;
 
+use std::time::Duration;
+
 use futures::StreamExt;
+use gpui_kit::base::Root;
 use gpui_kit::component::{Theme, ThemeMode, TitleBar};
 use gpui_kit::{
     ActivationPolicy, AnyWindowHandle, App, AppContext, Bounds, Entity, Global, Subscription,
@@ -18,6 +22,9 @@ use objc2::MainThreadMarker;
 use crate::preview::{Preview, PreviewEvent};
 use crate::status_item::StatusEvent;
 
+/// How long a camera switch waits for the old camera to stop.
+const STOP_WITHIN: Duration = Duration::from_secs(5);
+
 /// App-wide state: the preview window and the menu bar icon.
 struct Shell {
     preview: Option<(AnyWindowHandle, Entity<Preview>)>,
@@ -26,6 +33,12 @@ struct Shell {
     /// Screen saver running, screen locked.
     saver: bool,
     locked: bool,
+    /// A camera switch is waiting for the old camera to stop.
+    switching: bool,
+    /// Previews whose camera had not stopped when switching away from it.
+    /// Dropping one would block the UI until the camera stopped, so each
+    /// is kept until it does.
+    stuck: Vec<Entity<Preview>>,
     _away: away::AwayWatch,
 }
 
@@ -53,7 +66,8 @@ fn open_preview(cx: &mut App) -> Option<(AnyWindowHandle, Entity<Preview>)> {
         });
         let shell = cx.global::<Shell>();
         let away = shell.saver || shell.locked;
-        cx.new(|cx| Preview::new(away, window, cx))
+        let camera = prefs::camera();
+        cx.new(|cx| Preview::new(away, camera, window, cx))
     })
     .map_err(|e| eprintln!("camctl: could not open the preview window: {e}"))
     .ok()
@@ -78,23 +92,110 @@ fn show_preview(cx: &mut App) {
             .is_ok()
     });
     if !alive {
-        let opened = open_preview(cx);
-        let live = opened.as_ref().map(|(_, preview)| {
-            cx.subscribe(preview, |_, event: &PreviewEvent, cx| {
-                let status = &cx.global::<Shell>().status;
-                match *event {
-                    PreviewEvent::Live(live) => status.set_live(live),
-                    PreviewEvent::Asleep(asleep) => status.set_asleep(asleep),
-                }
-            })
-        });
-        let shell = cx.global_mut::<Shell>();
-        // A new preview starts awake.
-        shell.status.set_asleep(false);
-        shell.preview = opened;
-        shell.live_events = live;
+        if let Some((handle, preview)) = open_preview(cx) {
+            adopt_preview(handle, preview, cx);
+        } else {
+            let shell = cx.global_mut::<Shell>();
+            shell.preview = None;
+            shell.live_events = None;
+        }
     }
     cx.activate(true);
+}
+
+/// Make `preview` the one the menu bar icon follows.
+fn adopt_preview(handle: AnyWindowHandle, preview: Entity<Preview>, cx: &mut App) {
+    let live = cx.subscribe(&preview, |_, event: &PreviewEvent, cx| {
+        let status = &cx.global::<Shell>().status;
+        match event {
+            PreviewEvent::Live(live) => status.set_live(*live),
+            PreviewEvent::Asleep(asleep) => status.set_asleep(*asleep),
+            PreviewEvent::Camera(id) => status.set_camera(Some(id)),
+        }
+    });
+    let camera = preview.read(cx).camera_id().map(str::to_owned);
+    let shell = cx.global_mut::<Shell>();
+    // A new preview starts awake, with no frames yet.
+    shell.status.set_asleep(false);
+    shell.status.set_live(false);
+    shell.status.set_camera(camera.as_deref());
+    shell.preview = Some((handle, preview));
+    shell.live_events = Some(live);
+}
+
+/// Preview and control another camera, and remember the choice. The old
+/// camera stops first, off the UI thread; then a fresh preview for the new
+/// one takes over the window, so nothing of the old camera's state (its
+/// controls, position or sleep) carries over.
+fn choose_camera(unique_id: &str, cx: &mut App) {
+    // The menu was filled when it opened; the camera may have gone since.
+    if !camctl_capture::devices()
+        .iter()
+        .any(|d| d.unique_id == unique_id)
+    {
+        events::record(&format!("camera [{unique_id}] went away before the switch"));
+        return;
+    }
+    prefs::set_camera(unique_id);
+    let shell = cx.global::<Shell>();
+    // The switch under way opens whichever camera was chosen last.
+    if shell.switching {
+        return;
+    }
+    let Some((handle, preview)) = shell.preview.clone() else {
+        show_preview(cx);
+        return;
+    };
+    if preview.read(cx).camera_id() == Some(unique_id) {
+        show_preview(cx);
+        return;
+    }
+    events::record(&format!("switching to camera [{unique_id}]"));
+    cx.global_mut::<Shell>().switching = true;
+    let stopped = preview.update(cx, Preview::shut_down);
+    cx.spawn(async move |cx| {
+        let timeout = cx.background_executor().timer(STOP_WITHIN);
+        let late = match futures::future::select(stopped, Box::pin(timeout)).await {
+            futures::future::Either::Left(_) => None,
+            futures::future::Either::Right(((), stopped)) => Some(stopped),
+        };
+        cx.update(|cx| replace_preview(handle, preview.clone(), late.is_none(), cx));
+        // Release a camera that was slow to stop once it has stopped.
+        if let Some(stopped) = late
+            && stopped.await.is_ok()
+        {
+            events::record("the old camera stopped; releasing its preview");
+            cx.update(|cx| {
+                cx.global_mut::<Shell>()
+                    .stuck
+                    .retain(|stuck| stuck != &preview);
+            });
+        }
+    })
+    .detach();
+}
+
+/// Swap a fresh preview, for the chosen camera, into the preview window.
+fn replace_preview(handle: AnyWindowHandle, old: Entity<Preview>, stopped: bool, cx: &mut App) {
+    let shell = cx.global_mut::<Shell>();
+    shell.switching = false;
+    if !stopped {
+        events::record("the old camera has not stopped; keeping its preview");
+        shell.stuck.push(old);
+    }
+    let away = shell.saver || shell.locked;
+    let camera = prefs::camera();
+    let replaced = handle.update(cx, |_, window, cx| {
+        let preview = cx.new(|cx| Preview::new(away, camera, window, cx));
+        window.replace_root(cx, |window, cx| Root::new(preview.clone(), window, cx));
+        preview
+    });
+    match replaced {
+        Ok(preview) => adopt_preview(handle, preview, cx),
+        // The window is gone: open a new one.
+        Err(_) => cx.global_mut::<Shell>().preview = None,
+    }
+    show_preview(cx);
 }
 
 fn handle_status(event: StatusEvent, cx: &mut App) {
@@ -108,7 +209,12 @@ fn handle_status(event: StatusEvent, cx: &mut App) {
                 show_preview(cx);
             }
         }
+        StatusEvent::ChooseCamera(unique_id) => choose_camera(&unique_id, cx),
         StatusEvent::ToggleSleep => {
+            // Mid-switch, the preview is the closing one.
+            if cx.global::<Shell>().switching {
+                return;
+            }
             if let Some((_, preview)) = cx.global::<Shell>().preview.clone() {
                 preview.update(cx, Preview::toggle_sleep);
             }
@@ -149,6 +255,8 @@ fn main() {
                 live_events: None,
                 saver: false,
                 locked: false,
+                switching: false,
+                stuck: Vec::new(),
                 _away: away,
             });
             show_preview(cx);

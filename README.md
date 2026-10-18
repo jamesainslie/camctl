@@ -109,7 +109,7 @@ The workspace produces two programs:
 ### Menu bar icon
 
 - The icon is a gimbal camera drawn in code as a template image, so it follows the menu bar's light or dark appearance. The lens fills while frames are streaming.
-- Left click shows or hides the preview. Right click or Control-click opens a menu with **Show or Hide Preview**, **Sleep Camera** (**Wake Camera** while it sleeps) and **Quit camctl**.
+- Left click shows or hides the preview. Right click or Control-click opens a menu with **Show or Hide Preview**, **Camera** (see [Choosing the camera](#choosing-the-camera)), **Sleep Camera** (**Wake Camera** while it sleeps) and **Quit camctl**.
 - The app has no Dock icon.
 
 ### Preview window
@@ -156,6 +156,18 @@ On a Tiny 2 Lite, the lens tilts to -80 degrees, and the camera then tips the re
 Other apps that use the camera keep streaming from it. Sleep stops only camctl's preview, so the camera light stays on while another app streams.
 
 The Sleep button sits in the bar, which appears only for a camera that camctl controls over USB. The menu item works for every camera. A camera without absolute pan and tilt does not move, so Sleep only stops the preview and Wake only resumes it. camctl does not remember sleep across launches. It starts awake, and if you quit while the camera sleeps, it does not aim the camera back.
+
+### Choosing the camera
+
+The **Camera** submenu in the menu bar menu lists every connected camera, USB and built in, with a check beside the one the preview shows. The list is read each time the menu opens, so a camera plugged in a moment ago appears. Two cameras with the same name are numbered, in the order macOS lists them.
+
+Choosing another camera stops the current one, then opens the new one in the same window and shows the preview. Nothing carries over from the old camera: its sleep, aim and zoom stay as they were, and the new camera starts awake. The controls, pad and Sleep button follow what the new camera supports. Choosing the checked camera again reopens it if it stopped working, after being unplugged and plugged back in, say.
+
+camctl remembers the choice across launches, by the camera's AVFoundation unique ID, in its user defaults (`defaults read us.ainslies.camctl camera`). A USB camera's ID includes its USB location, so the same camera plugged into another port counts as a different one. When the chosen camera is not connected at launch, camctl falls back to the first USB camera, or else the first camera of any kind, and keeps the choice for when it returns. To forget the choice:
+
+```sh
+defaults delete us.ainslies.camctl camera
+```
 
 ## Installing a release
 
@@ -360,7 +372,7 @@ flowchart TD
 
 **Control path.** While input is held, the app ticks the motion model every 33 ms. Each tick ramps the velocity toward the held speed and advances absolute pan, tilt and zoom targets. Releasing stops the targets at once, and the motor's own lag brings the camera to rest. Clicks, scroll steps, the slider, Home, Sleep and Wake produce single targets. Targets go to `ControlQueue`, which keeps only the newest value per control. A worker thread sends whatever is pending, so a burst of requests collapses to the write in flight plus the final value. Reads queue the same way and run after the pending writes. Control transfers use the default pipe and need no exclusive access, so they work while the system driver owns the camera and other apps stream from it.
 
-**Pairing.** The app previews the first USB camera AVFoundation lists, or the first camera of any kind. For a UVC camera, AVFoundation's unique ID encodes the IOKit location ID, vendor ID and product ID, and the app opens the nusb device that matches all three. Enumeration and the first reads run off the UI thread, and each first read is tried up to 4 times, 150 ms apart, because a camera that is starting its stream can stall or time out briefly.
+**Pairing.** The app previews the camera chosen in the **Camera** menu if it is connected, otherwise the first USB camera AVFoundation lists, or the first camera of any kind. Switching cameras stops the old capture session off the UI thread, then replaces the window's preview view with a new one, so no per-camera state carries over. For a UVC camera, AVFoundation's unique ID encodes the IOKit location ID, vendor ID and product ID, and the app opens the nusb device that matches all three. Enumeration and the first reads run off the UI thread, and each first read is tried up to 4 times, 150 ms apart, because a camera that is starting its stream can stall or time out briefly.
 
 ## Development
 

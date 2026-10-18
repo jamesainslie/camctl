@@ -1,14 +1,15 @@
 //! The menu bar icon. GPUI has no status item support, so this is a thin
 //! AppKit layer: left click toggles the preview window, right click (or
-//! control-click) opens a native menu, which also puts the camera to sleep
-//! or wakes it. Clicks become [`StatusEvent`]s on a channel that the GPUI
-//! side drains on its own executor.
+//! control-click) opens a native menu, which also chooses the camera and
+//! puts it to sleep or wakes it. Clicks become [`StatusEvent`]s on a
+//! channel that the GPUI side drains on its own executor.
 //!
 //! The icon is drawn in code as a template image (a gimbal webcam), so it
 //! is crisp at any scale and follows the menu bar's light or dark look. The
 //! lens fills in while the camera is streaming.
 
-use std::cell::OnceCell;
+use std::cell::{OnceCell, RefCell};
+use std::collections::HashMap;
 
 use block2::RcBlock;
 use futures::channel::mpsc::UnboundedSender;
@@ -16,16 +17,19 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, Bool, NSObject, NSObjectProtocol};
 use objc2::{DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send, sel};
 use objc2_app_kit::{
-    NSApplication, NSBezierPath, NSColor, NSEventMask, NSEventModifierFlags, NSEventType, NSImage,
-    NSMenu, NSMenuItem, NSStatusBar, NSStatusItem, NSVariableStatusItemLength, NSWindingRule,
+    NSApplication, NSBezierPath, NSColor, NSControlStateValueOn, NSEventMask, NSEventModifierFlags,
+    NSEventType, NSImage, NSMenu, NSMenuItem, NSStatusBar, NSStatusItem,
+    NSVariableStatusItemLength, NSWindingRule,
 };
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, ns_string};
 
 /// What the user asked for from the menu bar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StatusEvent {
     TogglePreview,
     ToggleSleep,
+    /// Preview and control the camera with this AVFoundation unique ID.
+    ChooseCamera(String),
     Quit,
 }
 
@@ -34,6 +38,13 @@ struct Ivars {
     tx: UnboundedSender<StatusEvent>,
     item: OnceCell<Retained<NSStatusItem>>,
     menu: OnceCell<Retained<NSMenu>>,
+    /// The Camera submenu, filled afresh each time the menu opens so it
+    /// lists the cameras connected right then.
+    cameras: OnceCell<Retained<NSMenu>>,
+    /// Unique IDs of the cameras in the submenu, indexed by item tag.
+    camera_ids: RefCell<Vec<String>>,
+    /// The camera the preview shows, checked in the submenu.
+    current: RefCell<Option<String>>,
 }
 
 define_class!(
@@ -75,6 +86,21 @@ define_class!(
         }
 
         // SAFETY: as above.
+        #[unsafe(method(chooseCamera:))]
+        fn choose_camera(&self, sender: Option<&AnyObject>) {
+            let Some(tag) = sender
+                .and_then(AnyObject::downcast_ref::<NSMenuItem>)
+                .and_then(|item| usize::try_from(item.tag()).ok())
+            else {
+                return;
+            };
+            let id = self.ivars().camera_ids.borrow().get(tag).cloned();
+            if let Some(id) = id {
+                self.send(StatusEvent::ChooseCamera(id));
+            }
+        }
+
+        // SAFETY: as above.
         #[unsafe(method(quit:))]
         fn quit(&self, _sender: Option<&AnyObject>) {
             self.send(StatusEvent::Quit);
@@ -88,6 +114,9 @@ impl StatusTarget {
             tx,
             item: OnceCell::new(),
             menu: OnceCell::new(),
+            cameras: OnceCell::new(),
+            camera_ids: RefCell::new(Vec::new()),
+            current: RefCell::new(None),
         });
         // SAFETY: NSObject's designated initializer, called once on a fresh
         // allocation.
@@ -118,6 +147,7 @@ impl StatusTarget {
         let Some(button) = item.button(self.mtm()) else {
             return;
         };
+        self.fill_cameras();
         // Attach the menu only for this click, so a plain left click keeps
         // toggling the window instead of opening the menu.
         item.setMenu(Some(menu));
@@ -125,6 +155,56 @@ impl StatusTarget {
         unsafe { button.performClick(None) };
         item.setMenu(None);
     }
+
+    /// List the connected cameras in the Camera submenu, the current one
+    /// checked.
+    fn fill_cameras(&self) {
+        let Some(menu) = self.ivars().cameras.get() else {
+            return;
+        };
+        let mtm = self.mtm();
+        menu.removeAllItems();
+        let devices = camctl_capture::devices();
+        let names: Vec<&str> = devices.iter().map(|d| d.name.as_str()).collect();
+        let current = self.ivars().current.borrow().clone();
+        for (tag, (device, title)) in devices.iter().zip(camera_titles(&names)).enumerate() {
+            let item = menu_item(
+                mtm,
+                &NSString::from_str(&title),
+                sel!(chooseCamera:),
+                ns_string!(""),
+                self,
+            );
+            item.setTag(isize::try_from(tag).unwrap_or(isize::MAX));
+            if current.as_deref() == Some(device.unique_id.as_str()) {
+                item.setState(NSControlStateValueOn);
+            }
+            menu.addItem(&item);
+        }
+        if devices.is_empty() {
+            // No action, so the menu shows it disabled.
+            menu.addItem(&info_item(mtm, ns_string!("No Cameras Connected")));
+        }
+        *self.ivars().camera_ids.borrow_mut() = devices.into_iter().map(|d| d.unique_id).collect();
+    }
+}
+
+/// Menu titles for cameras with these names, in order. Names shared by
+/// several cameras (two of the same model, say) are numbered so each can
+/// be told apart.
+fn camera_titles(names: &[&str]) -> Vec<String> {
+    let mut seen = HashMap::<&str, usize>::new();
+    names
+        .iter()
+        .map(|&name| {
+            if names.iter().filter(|&&n| n == name).count() == 1 {
+                return name.to_owned();
+            }
+            let n = seen.entry(name).or_default();
+            *n += 1;
+            format!("{name} ({n})")
+        })
+        .collect()
 }
 
 /// Size of the icon in points (the menu bar is 22 pt tall).
@@ -190,7 +270,7 @@ pub struct StatusItem {
     idle: Retained<NSImage>,
     live: Retained<NSImage>,
     sleep: Retained<NSMenuItem>,
-    _target: Retained<StatusTarget>,
+    target: Retained<StatusTarget>,
 }
 
 impl StatusItem {
@@ -204,6 +284,11 @@ impl StatusItem {
     /// Offer to wake the camera while it sleeps, and to sleep otherwise.
     pub fn set_asleep(&self, asleep: bool) {
         self.sleep.setTitle(sleep_title(asleep));
+    }
+
+    /// The camera the preview shows, by unique ID, to check in the menu.
+    pub fn set_camera(&self, unique_id: Option<&str>) {
+        *self.target.ivars().current.borrow_mut() = unique_id.map(str::to_owned);
     }
 }
 
@@ -242,6 +327,19 @@ fn menu_item(
     }
 }
 
+/// A menu item with no action: shown disabled, unless it opens a submenu.
+fn info_item(mtm: MainThreadMarker, title: &NSString) -> Retained<NSMenuItem> {
+    // SAFETY: a plain item with no action or target.
+    unsafe {
+        NSMenuItem::initWithTitle_action_keyEquivalent(
+            NSMenuItem::alloc(mtm),
+            title,
+            None,
+            ns_string!(""),
+        )
+    }
+}
+
 /// Put the camctl icon in the menu bar. Main thread only.
 pub fn install(mtm: MainThreadMarker, tx: UnboundedSender<StatusEvent>) -> StatusItem {
     let target = StatusTarget::new(mtm, tx);
@@ -270,6 +368,10 @@ pub fn install(mtm: MainThreadMarker, tx: UnboundedSender<StatusEvent>) -> Statu
         ns_string!(""),
         &target,
     ));
+    let cameras = NSMenu::new(mtm);
+    let camera = info_item(mtm, ns_string!("Camera"));
+    camera.setSubmenu(Some(&cameras));
+    menu.addItem(&camera);
     let sleep = menu_item(
         mtm,
         sleep_title(false),
@@ -289,12 +391,42 @@ pub fn install(mtm: MainThreadMarker, tx: UnboundedSender<StatusEvent>) -> Statu
 
     let _ = target.ivars().item.set(item.clone());
     let _ = target.ivars().menu.set(menu);
+    let _ = target.ivars().cameras.set(cameras);
     StatusItem {
         mtm,
         item,
         idle,
         live,
         sleep,
-        _target: target,
+        target,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::camera_titles;
+
+    #[test]
+    fn distinct_names_stay_as_they_are() {
+        assert_eq!(
+            camera_titles(&["OBSBOT Tiny 2 Lite", "FaceTime HD Camera"]),
+            ["OBSBOT Tiny 2 Lite", "FaceTime HD Camera"]
+        );
+    }
+
+    #[test]
+    fn repeated_names_are_numbered_in_order() {
+        assert_eq!(
+            camera_titles(&[
+                "OBSBOT Tiny 2 Lite",
+                "FaceTime HD Camera",
+                "OBSBOT Tiny 2 Lite"
+            ]),
+            [
+                "OBSBOT Tiny 2 Lite (1)",
+                "FaceTime HD Camera",
+                "OBSBOT Tiny 2 Lite (2)"
+            ]
+        );
     }
 }
