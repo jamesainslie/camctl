@@ -331,6 +331,48 @@ impl Motion {
         self.rig.tilt = self.rig.tilt_limits.clamp(0.0);
         self.rig.zoom = self.rig.zoom_limits.min;
     }
+
+    /// Point the lens at the floor for sleep (see [`sleep_aim`]) and drop
+    /// any held input. Zoom is left alone. Returns the pan and tilt it
+    /// pointed at before, to aim back at on waking.
+    pub fn park(&mut self, sleep_tilt: Option<f64>) -> (f64, f64) {
+        self.set_stick(Stick::default());
+        let was = (self.rig.pan, self.rig.tilt);
+        (self.rig.pan, self.rig.tilt) =
+            sleep_aim(self.rig.pan_limits, self.rig.tilt_limits, sleep_tilt);
+        was
+    }
+
+    /// Point at `pan` and `tilt` degrees, camera sign, held inside the
+    /// limits. Returns the new pan and tilt if they changed; non-finite
+    /// input changes nothing.
+    #[must_use]
+    pub fn aim(&mut self, pan: f64, tilt: f64) -> Option<(f64, f64)> {
+        if !(pan.is_finite() && tilt.is_finite()) {
+            return None;
+        }
+        let pan = self.rig.pan_limits.clamp(pan);
+        let tilt = self.rig.tilt_limits.clamp(tilt);
+        if (pan - self.rig.pan).abs() <= EPSILON && (tilt - self.rig.tilt).abs() <= EPSILON {
+            return None;
+        }
+        self.rig.pan = pan;
+        self.rig.tilt = tilt;
+        Some((pan, tilt))
+    }
+}
+
+/// Where a sleeping camera points: pan centred and tilt as far down as it
+/// goes, so the lens faces the desk or its own base. `sleep_tilt` replaces
+/// the bottom of the tilt range for cameras that will not go there (see
+/// [`crate::quirks::sleep_tilt`]). Pan and tilt are in degrees, camera
+/// sign, each held inside its limits. A non-finite `sleep_tilt` is ignored.
+#[must_use]
+pub fn sleep_aim(pan_limits: Limits, tilt_limits: Limits, sleep_tilt: Option<f64>) -> (f64, f64) {
+    let tilt = sleep_tilt
+        .filter(|t| t.is_finite())
+        .map_or(tilt_limits.min(), |t| tilt_limits.clamp(t));
+    (pan_limits.clamp(0.0), tilt)
 }
 
 /// Where a point in a view shows up in a frame drawn with object-fit

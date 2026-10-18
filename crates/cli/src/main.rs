@@ -3,6 +3,7 @@
 mod values;
 
 use anyhow::{Context, Result, bail};
+use camctl_core::motion::{Limits, sleep_aim};
 use camctl_uvc::{Camera, Control, ControlRange, FormatKind, Shape, Transport, Value};
 use clap::{Parser, Subcommand};
 
@@ -49,6 +50,15 @@ enum Command {
     },
     /// Centre the camera and zoom all the way out.
     Home,
+    /// Put the camera to sleep: pan centred and the lens tilted down as far
+    /// as the camera obeys, facing the desk. Zoom is left alone. A Tiny 2
+    /// Lite then enters its own sleep, and stays there until an app opens
+    /// its video.
+    Sleep,
+    /// Wake the camera: pan and tilt back to centre, zoom left alone. A
+    /// Tiny 2 Lite in its own sleep ignores this. It wakes when an app opens
+    /// its video.
+    Wake,
 }
 
 fn main() -> Result<()> {
@@ -120,6 +130,35 @@ fn main() -> Result<()> {
                     cam.set(Control::ZoomAbsolute, wide)?;
                 }
             }
+            Ok(())
+        }
+        Command::Sleep => {
+            if !cam.topology().supports(Control::PanTiltAbsolute) {
+                bail!("this camera cannot aim, so it cannot point down to sleep");
+            }
+            let range = cam.range(Control::PanTiltAbsolute)?;
+            let (Some(lo), Some(hi)) = (
+                range.min.and_then(|v| v.pan_tilt_degrees()),
+                range.max.and_then(|v| v.pan_tilt_degrees()),
+            ) else {
+                bail!("the camera does not report how far it can pan and tilt");
+            };
+            let (Some(pan), Some(tilt)) = (
+                Limits::from_range(lo.0, hi.0),
+                Limits::from_range(lo.1, hi.1),
+            ) else {
+                bail!("the camera reports an unusable pan and tilt range");
+            };
+            let quirk = camctl_core::quirks::sleep_tilt(info.vendor_id, info.product_id);
+            let (pan, tilt) = sleep_aim(pan, tilt, quirk);
+            cam.set(
+                Control::PanTiltAbsolute,
+                Value::pan_tilt_from_degrees(pan, tilt)?,
+            )?;
+            Ok(())
+        }
+        Command::Wake => {
+            cam.set(Control::PanTiltAbsolute, Value::PanTilt { pan: 0, tilt: 0 })?;
             Ok(())
         }
     }
@@ -231,6 +270,14 @@ mod tests {
     fn the_command_line_definition_is_valid() {
         use clap::CommandFactory as _;
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn sleep_and_wake_are_commands() {
+        let cli = Cli::try_parse_from(["camctl", "sleep"]).unwrap();
+        assert!(matches!(cli.command, Command::Sleep));
+        let cli = Cli::try_parse_from(["camctl", "-c", "1", "wake"]).unwrap();
+        assert!(matches!(cli.command, Command::Wake));
     }
 
     #[test]

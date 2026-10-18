@@ -5,7 +5,10 @@ use std::borrow::Cow;
 
 use gpui_kit::{AssetSource, Result, SharedString};
 
-gpui_kit::assets::icon_assets!(CamctlIcons, [Camera, LocateFixed, Move, Video, ZoomIn]);
+gpui_kit::assets::icon_assets!(
+    CamctlIcons,
+    [Camera, LocateFixed, Moon, Move, Sun, Video, ZoomIn]
+);
 
 /// camctl's icons first, then gpui-component's own.
 #[derive(Debug, Clone, Copy, Default)]
@@ -36,7 +39,9 @@ mod tests {
         for icon in [
             IconName::Camera,
             IconName::LocateFixed,
+            IconName::Moon,
             IconName::Move,
+            IconName::Sun,
             IconName::Video,
             IconName::ZoomIn,
         ] {

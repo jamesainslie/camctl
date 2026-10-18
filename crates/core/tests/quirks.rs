@@ -22,6 +22,20 @@ fn the_tiny_2_lite_lens_is_known() {
 }
 
 #[test]
+fn the_tiny_2_lite_sleeps_at_a_tilt_it_obeys() {
+    // It reports -90 degrees but ignores tilts below about -84.
+    assert_eq!(quirks::sleep_tilt(OBSBOT, TINY_2_LITE), Some(-80.0));
+}
+
+#[test]
+fn other_cameras_sleep_at_the_bottom_of_their_range() {
+    assert_eq!(quirks::sleep_tilt(0x046d, 0x085e), None);
+    // Matched by product, unlike the pan sign: other OBSBOT models are
+    // untested.
+    assert_eq!(quirks::sleep_tilt(OBSBOT, 0x0001), None);
+}
+
+#[test]
 fn unknown_cameras_get_a_typical_webcam_lens_without_zoom_magnification() {
     let fov = quirks::fov(0x046d, 0x085e);
     assert_eq!(fov, Fov::TYPICAL_WEBCAM);
