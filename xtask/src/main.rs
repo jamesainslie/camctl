@@ -4,6 +4,7 @@
 //! means a green CI there.
 
 mod changelog;
+mod homebrew;
 mod manifest;
 mod tools;
 
@@ -66,6 +67,17 @@ enum Task {
     VerifyTag { tag: String },
     /// Build the release artifacts into dist/.
     Dist,
+    /// Write the Homebrew cask (the app) and formula (the CLI) for the
+    /// current version into a clone of yaklabco/homebrew-tap.
+    Homebrew {
+        /// The tap clone to write into.
+        #[arg(long)]
+        tap: PathBuf,
+        /// The release's checksums (default: dist/SHA256SUMS, as
+        /// `cargo xtask dist` writes them).
+        #[arg(long)]
+        sums: Option<PathBuf>,
+    },
     /// Print the workspace version.
     Version,
 }
@@ -513,7 +525,9 @@ fn smoke_cli() -> Result<()> {
     if got != want {
         bail!("camctl --version printed {got:?}, expected {want:?}");
     }
-    for command in ["list", "controls", "formats", "get", "set", "point", "home"] {
+    for command in [
+        "list", "controls", "formats", "get", "set", "point", "home", "sleep", "wake",
+    ] {
         output(camctl, &[command, "--help"])?;
     }
     eprintln!("{got}; every subcommand's --help works");
@@ -814,6 +828,16 @@ fn dist() -> Result<()> {
     Ok(())
 }
 
+fn homebrew_task(tap: &Path, sums: &Path) -> Result<()> {
+    let version = current_version()?;
+    let sums =
+        std::fs::read_to_string(sums).with_context(|| format!("reading {}", sums.display()))?;
+    for path in homebrew::write(tap, &version, &sums)? {
+        println!("{}", path.display());
+    }
+    Ok(())
+}
+
 fn main() -> Result<()> {
     match Cli::parse().task {
         Task::Ci => ci(),
@@ -826,6 +850,10 @@ fn main() -> Result<()> {
         Task::Tag => tag(),
         Task::VerifyTag { tag } => verify_tag(&tag),
         Task::Dist => dist(),
+        Task::Homebrew { tap, sums } => homebrew_task(
+            &tap,
+            &sums.unwrap_or_else(|| root().join("dist").join("SHA256SUMS")),
+        ),
         Task::Version => {
             println!("{}", current_version()?);
             Ok(())

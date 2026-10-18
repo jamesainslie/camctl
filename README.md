@@ -109,7 +109,7 @@ The workspace produces two programs:
 ### Menu bar icon
 
 - The icon is a gimbal camera drawn in code as a template image, so it follows the menu bar's light or dark appearance. The lens fills while frames are streaming.
-- Left click shows or hides the preview. Right click or Control-click opens a menu with **Show or Hide Preview** and **Quit camctl**.
+- Left click shows or hides the preview. Right click or Control-click opens a menu with **Show or Hide Preview**, **Sleep Camera** (**Wake Camera** while it sleeps) and **Quit camctl**.
 - The app has no Dock icon.
 
 ### Preview window
@@ -117,7 +117,7 @@ The workspace produces two programs:
 - The window floats above other apps' windows, appears on every Space and alongside full-screen apps. It opens at 640x420 points and resizes down to 320x220.
 - Closing the window hides it. The menu bar icon brings it back; quit from the menu bar menu.
 - Video is zero-copy. AVFoundation delivers IOSurface-backed 420f `CVPixelBuffer`s, and GPUI's `surface` element draws them without copying. Only the newest frame is kept, and late frames are discarded.
-- The camera streams only while the window can be seen and the user is present. Hiding the window, covering it, a sleeping display, the screen saver and the lock screen each stop the capture session, and the camera light goes off. The screen saver and lock screen are watched through system notifications, because macOS does not count the screen saver as covering other windows.
+- The camera streams only while the window can be seen, the user is present and the camera is awake. Hiding the window, covering it, a sleeping display, the screen saver, the lock screen and [Sleep](#sleep) each stop the capture session, and the camera light goes off. The screen saver and lock screen are watched through system notifications, because macOS does not count the screen saver as covering other windows.
 - A dot in the title bar turns green while frames arrive, next to the camera's name.
 
 ### Pan, tilt and zoom
@@ -141,7 +141,47 @@ The bar below the video holds the zoom slider, the current magnification (1.0x t
 
 Drag and click aiming require a camera that reports absolute pan and tilt with a readable range. Zoom inputs and the slider require absolute zoom. The pad shows only the buttons the camera supports.
 
+### Sleep
+
+The **Sleep** button at the right of the bar, or **Sleep Camera** in the menu bar menu, puts the camera to sleep:
+
+- The camera turns its lens down, facing the desk, with pan centred. Zoom is left alone.
+- camctl stops its capture session, and the window says the camera is asleep.
+- Keys, drags, clicks, scrolling, the pad and the zoom slider are ignored until the camera wakes.
+
+**Wake**, or **Wake Camera** in the menu, aims the camera back where it pointed and resumes the preview if the window can be seen. Sleep lasts until you wake the camera. Hiding and showing the window does not wake it.
+
+On a Tiny 2 Lite, the lens tilts to -80 degrees, and the camera then tips the rest of the way down by itself and enters its own sleep. That is the same sleep that OBSBOT Center offers, reached through the standard pan-tilt control only. A sleeping Tiny 2 Lite ignores pan and tilt until an app opens its video. On waking, camctl sends the aim again with the first frame.
+
+Other apps that use the camera keep streaming from it. Sleep stops only camctl's preview, so the camera light stays on while another app streams.
+
+The Sleep button sits in the bar, which appears only for a camera that camctl controls over USB. The menu item works for every camera. A camera without absolute pan and tilt does not move, so Sleep only stops the preview and Wake only resumes it. camctl does not remember sleep across launches. It starts awake, and if you quit while the camera sleeps, it does not aim the camera back.
+
 ## Installing a release
+
+### Homebrew
+
+The [yaklabco tap](https://github.com/yaklabco/homebrew-tap) carries a cask
+for the app and a formula for the CLI. The repository is private, so
+Homebrew needs a GitHub token that can read it, in
+`HOMEBREW_GITHUB_API_TOKEN`, to download a release:
+
+```sh
+export HOMEBREW_GITHUB_API_TOKEN="$(gh auth token)"
+brew install --cask yaklabco/tap/camctl
+```
+
+The cask installs `camctl.app` into `/Applications`, clears the download
+quarantine (see below), and pulls in the `camctl-cli` formula, which puts
+`camctl` on the `PATH`. `brew upgrade` needs the same token. Upgrading
+and uninstalling quit the app first, and macOS asks once whether your
+terminal may control camctl.
+
+To start camctl at login, add it under System Settings, General, Login
+Items. The cask leaves login items alone, because upgrades would remove
+them.
+
+### By hand
 
 Each [release](https://github.com/jamesainslie/camctl/releases) carries:
 
@@ -238,6 +278,8 @@ camctl [-c N] <command>
 | `camctl set <control> <value>` | Write one control, then print the value read back |
 | `camctl point <right> <up>` | Point the camera, in degrees right and up from centre, on every camera |
 | `camctl home` | Pan and tilt to 0, and zoom all the way out |
+| `camctl sleep` | Turn the lens down, with pan centred, to put the camera to sleep. Zoom is left alone. Needs absolute pan and tilt with a readable range |
+| `camctl wake` | Pan and tilt to 0, zoom left alone. Unlike the app's **Wake**, it does not return to the earlier aim. A Tiny 2 Lite in its own sleep ignores this and wakes when an app opens its video |
 
 ### Examples
 
@@ -256,6 +298,7 @@ camctl set exposure-mode manual
 camctl set pan-tilt-move 1,5,-1,3    # starts a relative move
 camctl set pan-tilt-move 0,0,0,0     # stops it
 camctl home
+camctl sleep                         # lens down; a Tiny 2 Lite enters its own sleep
 ```
 
 Negative values parse as values, not flags, so `camctl point -20 5` and `camctl set brightness -5` need no `--`. `set` prints the value read back as `key = value`. Relative controls often cannot be read, in which case `set` reports that the write succeeded and the read-back was unavailable. Relative moves (`*-move`) continue until a stop is sent.
@@ -282,7 +325,7 @@ Negative values parse as values, not flags, so `camctl point -20 5` and `camctl 
 | `crates/uvc` (`camctl-uvc`) | UVC descriptor parsing, the control catalogue, wire encoding of values, and `Camera`, which drives controls through a `Transport` trait. No I/O |
 | `crates/usb` (`camctl-usb`) | `Transport` over nusb (IOKit): finds devices with a UVC video control interface and sends class requests on the default control pipe, 500 ms timeout |
 | `crates/capture` (`camctl-capture`) | AVFoundation devices, camera permission, the stream format policy, and a capture session that keeps only the newest frame |
-| `crates/core` (`camctl-core`) | UI-independent logic: the motion model and `ControlQueue` |
+| `crates/core` (`camctl-core`) | UI-independent logic: the motion model, including the sleep aim, the per-camera quirks table and `ControlQueue` |
 | `crates/cli` (`camctl-cli`) | The `camctl` binary |
 | `crates/app` (`camctl-app`) | The GPUI app (through gpui-kit): preview window, AppKit menu bar item, screen saver and lock watcher |
 
@@ -315,7 +358,7 @@ flowchart TD
 
 **Frame path.** The capture session's video output asks AVFoundation for 420f, Metal-compatible pixel buffers and discards late frames. Its delegate runs on a serial dispatch queue and replaces the contents of a one-frame slot. It wakes the UI thread only when it fills an empty slot, so at most one wake-up is outstanding however fast frames arrive. The UI thread takes the frame and passes its pixel buffer to GPUI's `surface` element, drawn with object-fit cover. Buffers in any other pixel format are dropped, because GPUI's surface renderer accepts only 420f.
 
-**Control path.** While input is held, the app ticks the motion model every 33 ms. Each tick ramps the velocity toward the held speed and advances absolute pan, tilt and zoom targets. Releasing stops the targets at once, and the motor's own lag brings the camera to rest. Clicks, scroll steps, the slider and Home produce single targets. Targets go to `ControlQueue`, which keeps only the newest value per control. A worker thread sends whatever is pending, so a burst of requests collapses to the write in flight plus the final value. Reads queue the same way and run after the pending writes. Control transfers use the default pipe and need no exclusive access, so they work while the system driver owns the camera and other apps stream from it.
+**Control path.** While input is held, the app ticks the motion model every 33 ms. Each tick ramps the velocity toward the held speed and advances absolute pan, tilt and zoom targets. Releasing stops the targets at once, and the motor's own lag brings the camera to rest. Clicks, scroll steps, the slider, Home, Sleep and Wake produce single targets. Targets go to `ControlQueue`, which keeps only the newest value per control. A worker thread sends whatever is pending, so a burst of requests collapses to the write in flight plus the final value. Reads queue the same way and run after the pending writes. Control transfers use the default pipe and need no exclusive access, so they work while the system driver owns the camera and other apps stream from it.
 
 **Pairing.** The app previews the first USB camera AVFoundation lists, or the first camera of any kind. For a UVC camera, AVFoundation's unique ID encodes the IOKit location ID, vendor ID and product ID, and the app opens the nusb device that matches all three. Enumeration and the first reads run off the UI thread, and each first read is tried up to 4 times, 150 ms apart, because a camera that is starting its stream can stall or time out briefly.
 
@@ -336,6 +379,7 @@ runs the same tasks locally and in CI:
 | `cargo xtask tag` | Tag `main` after a release PR merges |
 | `cargo xtask verify-tag TAG` | Fails unless the tag matches `Cargo.toml` and the changelog (the release workflow runs it) |
 | `cargo xtask dist` | Build the release zip, CLI tarball and checksums into `dist/` |
+| `cargo xtask homebrew --tap DIR [--sums FILE]` | Write the Homebrew cask and formula for the current version into a clone of yaklabco/homebrew-tap, from `dist/SHA256SUMS` by default |
 | `cargo xtask notes [VERSION]` | Print a version's release notes from the changelog |
 | `cargo xtask version` | Print the workspace version |
 
@@ -353,8 +397,8 @@ The tests need no camera:
 - The `uvc` tests parse configuration descriptors captured from an OBSBOT
   Tiny 2 Lite (`crates/uvc/tests/fixtures`) and drive `Camera` through fake
   transports.
-- The `core` tests cover the motion model, the click and drag geometry,
-  and the queue's coalescing.
+- The `core` tests cover the motion model and the sleep aim, the click and
+  drag geometry, the per-camera quirks, and the queue's coalescing.
 - The `capture` tests cover the format policy and the frame hand-off.
 - The `xtask` tests cover changelog parsing and consistency, the semver
   rules, the workspace manifest rules and the tool pins.
@@ -468,7 +512,7 @@ procedure, including Developer ID signing and notarization, is in
 ## Troubleshooting
 
 camctl records state changes (camera opened, paused and why, resumed,
-restarted, failed control writes) in `~/Library/Logs/camctl/camctl.log`:
+restarted, put to sleep and woken, failed control writes) in `~/Library/Logs/camctl/camctl.log`:
 
 ```sh
 tail -f ~/Library/Logs/camctl/camctl.log
@@ -485,6 +529,7 @@ session, and says so in the window if the camera still sends no video.
 - **OBSBOT pan direction.** OBSBOT cameras pan left for positive pan, against the UVC convention. `camctl-core`'s quirks table recognises them by USB vendor ID `0x3564`, and both the app and `camctl point` work in right-and-up terms on every camera. `camctl get` and `camctl set pan-tilt` show and take the camera's own values, so on an OBSBOT their pan sign is the opposite of the app's readout.
 - **Relative pan.** The Tiny 2 Lite's relative pan-tilt control pans in one direction only. This is why the app never uses relative moves and instead streams absolute targets that advance at a steady rate. The CLI's `pan-tilt-move` is subject to the same camera behaviour.
 - **Position sync.** The camera's on-device tracking can move it without camctl. While the preview streams and no input is held, the app reads pan, tilt and zoom every 2 s and adopts them, so held moves and click-to-aim start from where the camera points.
+- **Sleep tilt.** The Tiny 2 Lite reports a tilt range of -90 to 90 degrees but ignores tilts below about -84 degrees, and it ignores the whole tilt part of the request, not just the excess. The quirks table gives it a sleep tilt of -80 degrees. Other cameras tilt to the bottom of the range they report.
 - **Click to focus.** UVC 1.1 has no focus-point control. A click aims the camera at the point, and the camera's continuous autofocus then focuses on what is now centred. This requires autofocus to be on, for example with `camctl set focus-auto on`.
 - **Lens geometry.** Click-to-aim needs the lens's field of view. The quirks table knows the Tiny 2 Lite (67.2 degrees horizontal, 1x to 4x zoom). Other cameras get a typical webcam guess (70 degrees, no assumed zoom magnification), so a click lands close and a second click refines it. The aim rotates the clicked ray by the current tilt, so corners and tilted views aim correctly.
 - **Camera choice.** The app has no camera picker. A built-in camera, used only when no USB camera is present, gets a preview without controls. The CLI selects cameras with `-c`.

@@ -30,6 +30,9 @@ jobs:
       # exist; without them the app is ad-hoc signed.
       HAS_SIGNING: ${{ secrets.APPLE_DEVELOPER_ID_P12 != '' }}
       HAS_NOTARY: ${{ secrets.APPLE_APP_PASSWORD != '' }}
+      # The Homebrew tap is updated only when this secret exists: a token
+      # that can push to yaklabco/homebrew-tap.
+      HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -107,3 +110,47 @@ jobs:
             dist/camctl-"$version"-macos-*.zip \
             dist/camctl-cli-"$version"-macos-*.tar.gz \
             dist/SHA256SUMS
+
+      - name: Note that the Homebrew tap is not updated
+        if: env.HAS_TAP_TOKEN != 'true'
+        run: echo "::notice::HOMEBREW_TAP_TOKEN is not set; yaklabco/homebrew-tap was not updated"
+
+      # The tap is public: clone and render without the token, which only
+      # the push step sees.
+      - name: Write the Homebrew cask and formula
+        if: env.HAS_TAP_TOKEN == 'true'
+        run: |
+          set -euo pipefail
+          tap="$RUNNER_TEMP/homebrew-tap"
+          git clone https://github.com/yaklabco/homebrew-tap.git "$tap"
+          cargo xtask homebrew --tap "$tap" --sums dist/SHA256SUMS
+          ruby -c "$tap/Casks/camctl.rb" "$tap/Formula/camctl-cli.rb"
+
+      - name: Push the cask and formula to yaklabco/homebrew-tap
+        if: env.HAS_TAP_TOKEN == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          cd "$RUNNER_TEMP/homebrew-tap"
+          git add Casks/camctl.rb Formula/camctl-cli.rb
+          if git diff --cached --quiet; then
+            echo "the tap already has camctl $version"
+            exit 0
+          fi
+          # Set on the clone, so a rebase below can commit as well.
+          git config user.name "YakLabs"
+          git config user.email "official@yaklab.org"
+          git commit -m "chore(brew): update camctl to v$version"
+          gh auth setup-git
+          # Other repositories push to the tap too: rebase onto theirs.
+          for attempt in 1 2 3; do
+            if git push origin HEAD:main; then
+              exit 0
+            fi
+            echo "push $attempt rejected; rebasing onto the tap's main"
+            git pull --rebase origin main
+          done
+          echo "::error::could not push to yaklabco/homebrew-tap"
+          exit 1

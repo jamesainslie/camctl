@@ -9,6 +9,21 @@ anything else bumps the patch; see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Added
+
+- Camera sleep. A **Sleep** button in the preview's bar, and **Sleep
+  Camera** in the menu bar menu, turn the lens down and stop the preview.
+  Zoom is left alone. **Wake** aims the camera back and resumes. On a
+  Tiny 2 Lite this enters the camera's own sleep mode through the
+  standard pan-tilt control.
+- `camctl sleep` and `camctl wake` CLI commands: lens down with pan
+  centred, and pan and tilt back to centre.
+- Per-camera quirk: the Tiny 2 Lite's sleep tilt of -80 degrees, since it
+  ignores tilts below about -84.
+- Homebrew: a `camctl` cask (the app) and a `camctl-cli` formula in
+  yaklabco/homebrew-tap, written by `cargo xtask homebrew` and pushed by
+  the release workflow when `HOMEBREW_TAP_TOKEN` is set.
+
 ## [0.1.0] - 2026-10-17
 
 ### Added
