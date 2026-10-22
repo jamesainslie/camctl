@@ -30,6 +30,9 @@ pub enum StatusEvent {
     ToggleSleep,
     /// Preview and control the camera with this AVFoundation unique ID.
     ChooseCamera(String),
+    /// Close the camera and open it afresh, for when it has stopped
+    /// answering.
+    Reconnect,
     Quit,
 }
 
@@ -98,6 +101,12 @@ define_class!(
             if let Some(id) = id {
                 self.send(StatusEvent::ChooseCamera(id));
             }
+        }
+
+        // SAFETY: as above.
+        #[unsafe(method(reconnect:))]
+        fn reconnect(&self, _sender: Option<&AnyObject>) {
+            self.send(StatusEvent::Reconnect);
         }
 
         // SAFETY: as above.
@@ -380,6 +389,13 @@ pub fn install(mtm: MainThreadMarker, tx: UnboundedSender<StatusEvent>) -> Statu
         &target,
     );
     menu.addItem(&sleep);
+    menu.addItem(&menu_item(
+        mtm,
+        ns_string!("Reconnect Camera"),
+        sel!(reconnect:),
+        ns_string!(""),
+        &target,
+    ));
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&menu_item(
         mtm,

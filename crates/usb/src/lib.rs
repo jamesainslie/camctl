@@ -5,10 +5,12 @@
 //! apps are streaming from it.
 //!
 //! Note: on macOS nusb opens the device exclusively when it can, and keeps
-//! that until the device is dropped. With a camera the system driver has
-//! claimed, which is the usual case, the exclusive open fails and nusb
-//! falls back to shared access. Keep opened cameras only as long as needed
-//! all the same: a vendor firmware updater may want the device to itself.
+//! that until the device is dropped. The system camera driver claims the
+//! camera's interfaces, not the device, so the exclusive device open
+//! usually succeeds (ioreg shows the camctl process as the device's
+//! `UsbExclusiveOwner`). Streaming is unaffected, since that goes through
+//! the interfaces; but a vendor firmware updater that wants the device to
+//! itself needs camctl quit first.
 //!
 //! macOS only: device matching relies on IOKit location IDs.
 

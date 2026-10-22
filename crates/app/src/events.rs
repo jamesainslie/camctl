@@ -53,6 +53,20 @@ fn now() -> String {
     )
 }
 
+/// An error with its causes, `outer: inner: innermost`, so the log says
+/// why something failed and not just what (a stall, a timeout and a dead
+/// handle look the same otherwise).
+pub fn describe(error: &dyn std::error::Error) -> String {
+    let mut text = error.to_string();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
 /// Record one state change.
 pub fn record(message: &str) {
     let line = format!("{} {message}\n", now());
@@ -69,5 +83,28 @@ pub fn record(message: &str) {
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         // Logging is best effort; a full disk must not stop the camera.
         let _ = file.write_all(line.as_bytes());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use camctl_uvc::{CameraError, Control, RequestCode, TransportError};
+
+    use super::describe;
+
+    #[test]
+    fn the_log_shows_why_a_request_failed() {
+        let e = CameraError::Request {
+            control: Control::ZoomAbsolute,
+            code: RequestCode::SetCur,
+            source: TransportError::Disconnected,
+        };
+        assert_eq!(describe(&e), "Zoom: SET_CUR failed: device disconnected");
+    }
+
+    #[test]
+    fn an_error_without_a_cause_is_just_itself() {
+        let e = CameraError::Unsupported(Control::ZoomAbsolute);
+        assert_eq!(describe(&e), e.to_string());
     }
 }
