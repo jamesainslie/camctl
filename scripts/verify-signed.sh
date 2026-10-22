@@ -40,12 +40,18 @@ check "the hardened runtime is on" grep -Eq '^CodeDirectory .*flags=.*runtime' <
 check "it has a secure timestamp" grep -q '^Timestamp=' <<<"$details"
 check "it may use the camera" \
   grep -Eq 'com\.apple\.security\.device\.camera</key>[[:space:]]*<true/>' <<<"$entitlements"
-# Shows stapler's own words when it fails, which say why.
+# Tried a few times, since stapler may ask Apple's ticket service, which
+# lags a fresh notarization; shows stapler's own words when it fails.
 stapled() {
-  local out
-  if out="$(xcrun stapler validate "$1" 2>&1)"; then
-    return 0
-  fi
+  local out attempt
+  for attempt in 1 2 3; do
+    if out="$(xcrun stapler validate "$1" 2>&1)"; then
+      return 0
+    fi
+    if ((attempt < 3)); then
+      sleep 10
+    fi
+  done
   local line
   while IFS= read -r line; do
     printf '  stapler: %s\n' "$line" >&2

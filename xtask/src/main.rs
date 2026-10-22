@@ -756,6 +756,27 @@ fn verify_tag(tag: &str) -> Result<()> {
     Ok(())
 }
 
+/// Run `step` up to `attempts` times, pausing between failures; the last
+/// error if none succeeds.
+fn retried<T>(
+    attempts: u32,
+    pause: std::time::Duration,
+    mut step: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    let mut tries = 1;
+    loop {
+        match step() {
+            Ok(value) => return Ok(value),
+            Err(e) if tries >= attempts => return Err(e),
+            Err(e) => {
+                eprintln!("{e:#}; trying again in {}s", pause.as_secs());
+                std::thread::sleep(pause);
+                tries += 1;
+            }
+        }
+    }
+}
+
 /// How `notarytool` signs in to Apple's notary service.
 #[derive(Debug, PartialEq, Eq)]
 enum Notary {
@@ -848,7 +869,11 @@ fn dist() -> Result<()> {
                 &[password],
             )?,
         }
-        run("xcrun", &["stapler", "staple", "dist/camctl.app"])?;
+        // Apple's ticket service lags the notary's "Accepted" by a few
+        // seconds to a minute; stapling before then fails (Error 68).
+        retried(6, std::time::Duration::from_secs(15), || {
+            run("xcrun", &["stapler", "staple", "dist/camctl.app"])
+        })?;
         std::fs::remove_file(root().join(&app_zip))?;
         zip_app(&app_zip)?;
     } else {
@@ -904,7 +929,31 @@ fn main() -> Result<()> {
 mod tests {
     use clap::CommandFactory as _;
 
-    use super::{Cli, Notary, all_passed, escape_data, escape_property, notary};
+    use super::{Cli, Notary, all_passed, escape_data, escape_property, notary, retried};
+
+    #[test]
+    fn a_step_that_fails_at_first_is_tried_again() {
+        let mut calls = 0;
+        let result = retried(5, std::time::Duration::ZERO, || {
+            calls += 1;
+            if calls < 3 {
+                anyhow::bail!("not yet");
+            }
+            Ok(calls)
+        });
+        assert_eq!(result.unwrap(), 3);
+    }
+
+    #[test]
+    fn a_step_that_keeps_failing_returns_its_last_error() {
+        let mut calls = 0;
+        let result: anyhow::Result<()> = retried(4, std::time::Duration::ZERO, || {
+            calls += 1;
+            anyhow::bail!("failure {calls}")
+        });
+        assert_eq!(calls, 4);
+        assert_eq!(result.unwrap_err().to_string(), "failure 4");
+    }
 
     #[test]
     fn the_command_line_definition_is_valid() {
