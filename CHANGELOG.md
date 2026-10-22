@@ -9,6 +9,55 @@ anything else bumps the patch; see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Added
+
+- Choosing the camera. A **Camera** submenu in the menu bar menu lists
+  the connected cameras, checks the one the preview shows, and switches
+  the preview and its controls to another. The choice is remembered
+  across launches; when the chosen camera is not connected, camctl falls
+  back to the first USB camera.
+- One camctl at a time. A second launch, of another copy or a fresh
+  build, adds no menu bar icon: it asks the running camctl to show its
+  preview and quits. The lock is
+  `~/Library/Application Support/camctl/instance.lock`.
+- **Reconnect Camera** in the menu bar menu closes the camera and opens it
+  afresh.
+
+### Changed
+
+- Releases are Developer ID signed and notarized, so Gatekeeper opens a
+  downloaded camctl and the camera permission survives updates. The
+  release workflow refuses to publish without the signing and notary
+  secrets, or an app that `scripts/verify-signed.sh` rejects. The cask no
+  longer clears the download quarantine. Local releases can notarize with
+  a keychain profile, `CAMCTL_NOTARY_PROFILE`.
+- Quit stops the camera, then quits, and leaves within about 2 s even if
+  the camera does not stop.
+- The event log records why a request failed (for example
+  `Zoom: SET_CUR failed: device disconnected`), cameras connected and
+  disconnected, the Mac waking, and control reconnects.
+
+### Fixed
+
+- A camera that was unplugged, or that re-enumerated while the Mac slept,
+  stayed lost until camctl restarted. The preview now follows the cameras
+  and reopens on the chosen one, else the first USB camera, else the
+  built-in camera. The shown camera gets about 4 s to come back before
+  camctl falls back to another. A reopen camctl makes by itself does not
+  bring the window forward or turn the camera on while the window is
+  hidden, and a sleeping camera stays asleep.
+- Pan, tilt and zoom stopped working when the USB control link died, after
+  sleep or a re-enumeration. camctl now drops and reopens the link, with
+  waits from 0.5 s doubling to 5 s and up to 8 tries, and also after every
+  Mac wake. The bar says "reconnecting to the camera's controls…"
+  meanwhile, and "controls lost · choose Reconnect Camera in the menu" if
+  it gives up.
+- Pending control writes are sent in the order of their latest request, so
+  turning auto focus off and then setting a manual focus works within one
+  batch.
+- A camera that answers GET_RES or GET_DEF with a short or empty packet
+  keeps the limits it did report.
+
 ## [0.1.1] - 2026-10-18
 
 ### Added

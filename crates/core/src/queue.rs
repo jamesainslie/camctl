@@ -12,7 +12,8 @@ use std::thread::{JoinHandle, ThreadId};
 use camctl_uvc::{Camera, CameraError, Control, Transport, Value};
 
 /// Requested values not yet written, at most one per control, in the order
-/// each control was first requested.
+/// of each control's latest request. That keeps dependent writes in the
+/// order they were asked for: auto focus off, then a manual focus, say.
 #[derive(Debug, Default)]
 pub struct Pending {
     order: Vec<Control>,
@@ -21,14 +22,15 @@ pub struct Pending {
 }
 
 impl Pending {
-    /// Request `value` for `control`, replacing any earlier pending value.
+    /// Request `value` for `control`, replacing any earlier pending value
+    /// and moving the control to the back.
     pub fn insert(&mut self, control: Control, value: Value) {
         if let Some(i) = self.order.iter().position(|&c| c == control) {
-            self.values[i] = value;
-        } else {
-            self.order.push(control);
-            self.values.push(value);
+            self.order.remove(i);
+            self.values.remove(i);
         }
+        self.order.push(control);
+        self.values.push(value);
     }
 
     /// Take everything pending.

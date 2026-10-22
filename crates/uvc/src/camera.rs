@@ -123,7 +123,8 @@ impl<T: Transport> Camera<T> {
         Ok(Value::decode(shape, &bytes)?)
     }
 
-    /// Like [`Self::read`], but a stall (request not supported) is `None`.
+    /// Like [`Self::read`], but a stall (request not supported) or a short
+    /// answer (some cameras send an empty packet instead) is `None`.
     fn read_optional(
         &self,
         control: Control,
@@ -131,10 +132,13 @@ impl<T: Transport> Camera<T> {
     ) -> Result<Option<Value>, CameraError> {
         match self.read(control, code) {
             Ok(v) => Ok(Some(v)),
-            Err(CameraError::Request {
-                source: TransportError::Stall,
-                ..
-            }) => Ok(None),
+            Err(
+                CameraError::Request {
+                    source: TransportError::Stall,
+                    ..
+                }
+                | CameraError::Value(ValueError::Short { .. }),
+            ) => Ok(None),
             Err(e) => Err(e),
         }
     }

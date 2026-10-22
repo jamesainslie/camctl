@@ -26,14 +26,39 @@ jobs:
     permissions:
       contents: write # create the GitHub release and upload its assets
     env:
-      # Developer ID signing and notarization run only when these secrets
-      # exist; without them the app is ad-hoc signed.
-      HAS_SIGNING: ${{ secrets.APPLE_DEVELOPER_ID_P12 != '' }}
-      HAS_NOTARY: ${{ secrets.APPLE_APP_PASSWORD != '' }}
       # The Homebrew tap is updated only when this secret exists: a token
       # that can push to yaklabco/homebrew-tap.
       HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
     steps:
+      # A release is Developer ID signed and notarized, or it is not made:
+      # an ad-hoc build is blocked by Gatekeeper and loses its camera
+      # permission on every update.
+      - name: Require the signing and notarization secrets
+        env:
+          HAS_P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 != '' }}
+          HAS_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_PASSWORD != '' }}
+          HAS_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_IDENTITY != '' }}
+          HAS_APPLE_ID: ${{ secrets.APPLE_ID != '' }}
+          HAS_TEAM_ID: ${{ secrets.APPLE_TEAM_ID != '' }}
+          HAS_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD != '' }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for pair in \
+            "HAS_P12 APPLE_DEVELOPER_ID_P12" \
+            "HAS_P12_PASSWORD APPLE_DEVELOPER_ID_PASSWORD" \
+            "HAS_IDENTITY APPLE_DEVELOPER_ID_IDENTITY" \
+            "HAS_APPLE_ID APPLE_ID" \
+            "HAS_TEAM_ID APPLE_TEAM_ID" \
+            "HAS_APP_PASSWORD APPLE_APP_PASSWORD"; do
+            read -r flag secret <<<"$pair"
+            if [ "${!flag}" != "true" ]; then
+              echo "::error::the $secret secret is not set; see docs/RELEASING.md"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
@@ -56,7 +81,6 @@ jobs:
         run: cargo xtask ci
 
       - name: Import the Developer ID certificate
-        if: env.HAS_SIGNING == 'true'
         env:
           P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
           P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_PASSWORD }}
@@ -77,22 +101,16 @@ jobs:
           rm "$RUNNER_TEMP/cert.p12"
           echo "CAMCTL_SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
 
-      - name: Use an ad-hoc signature
-        if: env.HAS_SIGNING != 'true'
-        run: echo "CAMCTL_SIGN_IDENTITY=-" >> "$GITHUB_ENV"
-
-      - name: Build the app and the CLI
+      - name: Build, sign and notarize the app, and build the CLI
         env:
-          APPLE_ID: ${{ env.HAS_NOTARY == 'true' && secrets.APPLE_ID || '' }}
-          APPLE_TEAM_ID: ${{ env.HAS_NOTARY == 'true' && secrets.APPLE_TEAM_ID || '' }}
-          APPLE_APP_PASSWORD: ${{ env.HAS_NOTARY == 'true' && secrets.APPLE_APP_PASSWORD || '' }}
-        run: |
-          set -euo pipefail
-          # Unset empty credentials so xtask skips notarization cleanly.
-          for v in APPLE_ID APPLE_TEAM_ID APPLE_APP_PASSWORD; do
-            [ -n "${!v}" ] || unset "$v"
-          done
-          cargo xtask dist
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: cargo xtask dist
+
+      # Nothing is published unless the app is what users must get.
+      - name: Verify the app is signed, notarized and accepted by Gatekeeper
+        run: scripts/verify-signed.sh dist/camctl.app
 
       - name: Write the release notes from CHANGELOG.md
         run: cargo xtask notes "$GITHUB_REF_NAME" > "$RUNNER_TEMP/notes.md"

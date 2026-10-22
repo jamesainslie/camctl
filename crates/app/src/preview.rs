@@ -15,9 +15,10 @@ use std::time::{Duration, Instant};
 
 use camctl_capture::policy::Want;
 use camctl_capture::{Authorization, Frame, Session};
+use camctl_core::health::{ControlHealth, Verdict, reconnect_delay};
 use camctl_core::motion::{Limits, Motion, Rig, Speeds, Stick, Targets, cover_offset, drag_stick};
 use camctl_core::{ControlQueue, QueueEvent, quirks};
-use camctl_uvc::{Control, Value};
+use camctl_uvc::{CameraError, Control, ControlRange, TransportError, Value};
 use futures::StreamExt;
 use futures::channel::mpsc::{UnboundedSender, unbounded};
 use gpui_kit::assets::IconName;
@@ -67,13 +68,17 @@ const MAX_RESTARTS: u32 = 3;
 const IDLE_WITHIN: Duration = Duration::from_secs(5);
 /// Cell size of the on-video pad.
 const PAD_CELL: f32 = 30.0;
+/// Tries at opening USB control before giving up (about 20 s in all, see
+/// `reconnect_delay`): a re-enumerating camera takes a moment to return.
+const MAX_CONTROL_ATTEMPTS: u32 = 8;
 
-/// For the menu bar: frames started or stopped flowing, or the camera
-/// went to sleep or woke.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// For the menu bar: frames started or stopped flowing, the camera went
+/// to sleep or woke, or the preview opened a camera (by unique ID).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PreviewEvent {
     Live(bool),
     Asleep(bool),
+    Camera(SharedString),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,18 +95,23 @@ enum Status {
 
 /// Whether the user has put the camera to sleep.
 #[derive(Debug, Clone, Copy, PartialEq)]
-enum Sleep {
+pub enum Sleep {
     Awake,
     /// Lens down, not streaming, input ignored. `wake_aim` is the pan and
     /// tilt to return to, once the camera has been parked.
     Asleep {
         wake_aim: Option<(f64, f64)>,
     },
-    /// Woken, with the aim still to be sent again on the first frame. A
+    /// Woken, with `aim` still to be sent again on the first frame. A
     /// Tiny 2 Lite in its own sleep ignores pan and tilt until a stream
     /// wakes it, then settles at a pose of its choosing. In testing, its
     /// first frame came once it had settled, so one resend was enough.
-    Waking,
+    /// The aim is kept until it goes out on a working link, so controls
+    /// that reconnect meanwhile (or a preview reopened meanwhile) still
+    /// aim the camera off the floor.
+    Waking {
+        aim: (f64, f64),
+    },
 }
 
 /// A press on the video that may become a drag.
@@ -143,10 +153,25 @@ pub struct Preview {
     last_zoom_sent: Option<i64>,
     focus: FocusHandle,
     wake: UnboundedSender<()>,
-    events: UnboundedSender<QueueEvent>,
+    /// Control results, tagged with the generation of the queue that sent
+    /// them, so a dropped queue's late results are ignored.
+    events: UnboundedSender<(u64, QueueEvent)>,
+    controls_gen: u64,
+    /// The camera's USB identity, when it has one: what to reopen when the
+    /// control link dies.
+    identity: Option<(u32, u16, u16)>,
+    health: ControlHealth,
+    /// Failed tries at opening USB control in a row, and the try under way.
+    control_attempts: u32,
+    controls_task: Option<Task<()>>,
+    zoom_events: Option<Subscription>,
     running: bool,
+    /// The camera to open, by unique ID, when it is connected.
+    preferred: Option<String>,
     /// The capture device, kept so a stuck session can be rebuilt.
     device: Option<camctl_capture::Device>,
+    /// Shut down for another camera: nothing may start the camera again.
+    closing: bool,
     /// Frames delivered at the last liveness check, the restarts tried for
     /// the current stall, the liveness timer, and whether a rebuild is
     /// waiting for the old session to stop.
@@ -162,7 +187,7 @@ pub struct Preview {
     /// Where this camera tilts to sleep, if not the bottom of its range.
     sleep_tilt: Option<f64>,
     tasks: Vec<Task<()>>,
-    subscriptions: Vec<Subscription>,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl EventEmitter<PreviewEvent> for Preview {}
@@ -200,7 +225,20 @@ fn px_f64(p: Pixels) -> f64 {
 
 impl Preview {
     /// `away` is whether the screen saver or lock screen is up right now.
-    pub fn new(away: bool, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// `preferred` is the unique ID of the camera to show, if connected;
+    /// without it (or without that camera) the first USB camera is shown.
+    /// `sleep` carries a sleeping camera over when its preview is reopened
+    /// (after it re-enumerated, say), so reopening does not wake it.
+    /// `visible` is whether the window can be seen: a preview reopened in
+    /// a hidden window must not turn the camera on.
+    pub fn new(
+        away: bool,
+        visible: bool,
+        preferred: Option<String>,
+        sleep: Sleep,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (wake, mut woken) = unbounded::<()>();
         // Frames: the capture queue pokes `wake` once per pending frame;
         // take it here, on the UI thread, and redraw.
@@ -212,12 +250,14 @@ impl Preview {
             }
         });
         // Control results from the worker thread.
-        let (events, mut results) = unbounded::<QueueEvent>();
+        let (events, mut results) = unbounded::<(u64, QueueEvent)>();
         let results = cx.spawn_in(window, async move |this, cx| {
-            while let Some(event) = results.next().await {
+            while let Some((generation, event)) = results.next().await {
                 if this
                     .update_in(cx, |this, window, cx| {
-                        this.on_queue_event(event, window, cx);
+                        if generation == this.controls_gen {
+                            this.on_queue_event(event, window, cx);
+                        }
                     })
                     .is_err()
                 {
@@ -227,6 +267,66 @@ impl Preview {
         });
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
+        let mut preview = Preview {
+            status: Status::Starting,
+            device_name: "camctl".into(),
+            frame: None,
+            session: None,
+            queue: None,
+            motion: None,
+            can_aim: false,
+            can_zoom: false,
+            zoom: None,
+            keys: BTreeSet::new(),
+            slow: false,
+            button: None,
+            press: None,
+            marker: None,
+            marker_task: None,
+            video_bounds: Rc::new(Cell::new(Bounds::default())),
+            ticking: false,
+            last_tick: Instant::now(),
+            writes: 0,
+            last_write: Instant::now(),
+            read_epoch: None,
+            last_zoom_sent: None,
+            focus,
+            wake,
+            events,
+            controls_gen: 0,
+            identity: None,
+            health: ControlHealth::default(),
+            control_attempts: 0,
+            controls_task: None,
+            zoom_events: None,
+            running: false,
+            preferred,
+            device: None,
+            closing: false,
+            watch_delivered: 0,
+            restarts: 0,
+            watchdog: None,
+            rebuilding: false,
+            visible,
+            away,
+            sleep,
+            sleep_tilt: None,
+            tasks: vec![frames, results],
+            _subscriptions: Self::observe_window(window, cx),
+        };
+        trace("authorization");
+        match camctl_capture::authorization() {
+            Authorization::Authorized => preview.open_camera(cx),
+            Authorization::NotDetermined => preview.ask_permission(cx),
+            Authorization::Denied | Authorization::Restricted => preview.status = Status::Denied,
+        }
+        preview.start_sync(cx);
+        preview
+    }
+
+    /// Follow the window: release held input when it loses focus, and
+    /// stream only while it can be seen.
+    fn observe_window(window: &mut Window, cx: &mut Context<Self>) -> Vec<Subscription> {
         // Never leave the camera moving when the window loses focus and its
         // key-up never arrives.
         let activation = cx.observe_window_activation(window, |this, window, cx| {
@@ -263,53 +363,7 @@ impl Preview {
                 this.refresh_streaming(cx);
             });
         });
-        let mut preview = Preview {
-            status: Status::Starting,
-            device_name: "camctl".into(),
-            frame: None,
-            session: None,
-            queue: None,
-            motion: None,
-            can_aim: false,
-            can_zoom: false,
-            zoom: None,
-            keys: BTreeSet::new(),
-            slow: false,
-            button: None,
-            press: None,
-            marker: None,
-            marker_task: None,
-            video_bounds: Rc::new(Cell::new(Bounds::default())),
-            ticking: false,
-            last_tick: Instant::now(),
-            writes: 0,
-            last_write: Instant::now(),
-            read_epoch: None,
-            last_zoom_sent: None,
-            focus,
-            wake,
-            events,
-            running: false,
-            device: None,
-            watch_delivered: 0,
-            restarts: 0,
-            watchdog: None,
-            rebuilding: false,
-            visible: true,
-            away,
-            sleep: Sleep::Awake,
-            sleep_tilt: None,
-            tasks: vec![frames, results],
-            subscriptions: vec![activation, visibility],
-        };
-        trace("authorization");
-        match camctl_capture::authorization() {
-            Authorization::Authorized => preview.open_camera(cx),
-            Authorization::NotDetermined => preview.ask_permission(cx),
-            Authorization::Denied | Authorization::Restricted => preview.status = Status::Denied,
-        }
-        preview.start_sync(cx);
-        preview
+        vec![activation, visibility]
     }
 
     fn ask_permission(&mut self, cx: &mut Context<Self>) {
@@ -335,12 +389,14 @@ impl Preview {
     }
 
     fn open_camera(&mut self, cx: &mut Context<Self>) {
+        if self.closing {
+            return;
+        }
         trace("open_camera");
         let devices = camctl_capture::devices();
-        let Some(device) = devices
-            .iter()
-            .find(|d| d.kind() == camctl_capture::DeviceKind::Usb)
-            .or_else(|| devices.first())
+        let ids: Vec<&str> = devices.iter().map(|d| d.unique_id.as_str()).collect();
+        let Some(device) = camctl_capture::pick_camera(&ids, self.preferred.as_deref())
+            .and_then(|i| devices.get(i))
         else {
             self.status = Status::NoCamera;
             return;
@@ -351,9 +407,11 @@ impl Preview {
         if !self.build_session(cx) {
             return;
         }
-        if let Some(identity) = camctl_capture::usb_identity(&device.unique_id) {
+        cx.emit(PreviewEvent::Camera(device.unique_id.clone().into()));
+        self.identity = camctl_capture::usb_identity(&device.unique_id);
+        if self.identity.is_some() {
             trace("open_controls");
-            self.open_controls(identity, cx);
+            self.open_controls(cx);
         }
         trace("camera open");
     }
@@ -367,6 +425,9 @@ impl Preview {
     }
 
     fn try_build_session(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.closing {
+            return false;
+        }
         let Some(old) = self.device.clone() else {
             return false;
         };
@@ -527,18 +588,100 @@ impl Preview {
     /// USB enumeration and the first reads run off the UI thread; a camera
     /// that is busy starting its stream can take a few hundred milliseconds
     /// to answer.
-    fn open_controls(&mut self, identity: (u32, u16, u16), cx: &mut Context<Self>) {
-        let task = cx.spawn(async move |this, cx| {
+    ///
+    /// After a failed try, the next waits a little longer, up to
+    /// `MAX_CONTROL_ATTEMPTS` tries. Replacing the task cancels a try that
+    /// has not started.
+    fn open_controls(&mut self, cx: &mut Context<Self>) {
+        let Some(identity) = self.identity else {
+            return;
+        };
+        if self.closing {
+            return;
+        }
+        let delay = self.control_attempts.checked_sub(1).map(reconnect_delay);
+        self.controls_task = Some(cx.spawn(async move |this, cx| {
+            if let Some(delay) = delay {
+                cx.background_executor().timer(delay).await;
+            }
             let opened = cx
                 .background_spawn(async move { open_usb_camera(identity) })
                 .await;
-            let Some((camera, initial)) = opened else {
-                trace("no USB control for this camera");
-                return;
-            };
-            let _ = this.update(cx, |this, cx| this.controls_ready(camera, initial, cx));
-        });
-        self.tasks.push(task);
+            let _ = this.update(cx, |this, cx| {
+                // This try is over (a task may drop its own handle).
+                this.controls_task = None;
+                this.controls_opened(opened, cx);
+            });
+        }));
+    }
+
+    fn controls_opened(
+        &mut self,
+        opened: Result<(UsbCamera, Initial), String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.closing {
+            return;
+        }
+        match opened {
+            // The count of failed tries starts over only once a transfer on
+            // the new link works (see `on_queue_event`): a link that opens
+            // and then fails every write must not reopen forever.
+            Ok((camera, initial)) => self.controls_ready(camera, initial, cx),
+            Err(why) => self.controls_unavailable(&why, cx),
+        }
+    }
+
+    fn controls_unavailable(&mut self, why: &str, cx: &mut Context<Self>) {
+        trace(&format!("no USB control for this camera ({why})"));
+        self.retry_controls(cx);
+    }
+
+    /// Count one failed try at a working control link and try again after
+    /// a pause, or give up after `MAX_CONTROL_ATTEMPTS` in a row. Reconnect
+    /// Camera in the menu, or the Mac waking, tries afresh.
+    fn retry_controls(&mut self, cx: &mut Context<Self>) {
+        self.control_attempts += 1;
+        if self.control_attempts >= MAX_CONTROL_ATTEMPTS {
+            trace(&format!(
+                "giving up on USB control after {MAX_CONTROL_ATTEMPTS} tries"
+            ));
+            self.control_attempts = 0;
+            cx.notify();
+            return;
+        }
+        trace(&format!(
+            "trying USB control again (try {} of {MAX_CONTROL_ATTEMPTS})",
+            self.control_attempts + 1
+        ));
+        self.open_controls(cx);
+    }
+
+    /// The control link is dead (the camera re-enumerated, say): drop it
+    /// and open the camera again. Input meanwhile moves nothing.
+    fn lose_controls(&mut self, why: &str, cx: &mut Context<Self>) {
+        let Some(queue) = self.queue.take() else {
+            return;
+        };
+        trace(&format!("USB control lost ({why}); reconnecting"));
+        // Results still on their way from the old queue are ignored.
+        self.controls_gen += 1;
+        // Dropping joins the worker, which may be mid-transfer.
+        cx.background_spawn(async move { drop(queue) }).detach();
+        self.retry_controls(cx);
+        cx.notify();
+    }
+
+    /// Reopen USB control whether or not it seems to work: after the Mac
+    /// wakes, a handle may be dead before any transfer has said so. This
+    /// is a fresh start, not a failure, so earlier tries are forgotten.
+    pub fn reconnect_controls(&mut self, why: &str, cx: &mut Context<Self>) {
+        self.control_attempts = 0;
+        if self.queue.is_some() {
+            self.lose_controls(why, cx);
+        } else if self.identity.is_some() && self.controls_task.is_none() {
+            self.open_controls(cx);
+        }
     }
 
     fn controls_ready(
@@ -569,43 +712,91 @@ impl Preview {
                     .step(zoom_step as f32)
                     .default_value(rig.zoom as f32)
             });
-            let sub = cx.subscribe(&slider, |this, _, event: &SliderEvent, cx| {
+            // Opened again after the link died: the new slider replaces the
+            // old one and its subscription.
+            self.zoom_events = Some(cx.subscribe(&slider, |this, _, event: &SliderEvent, cx| {
                 let (SliderEvent::Change(v) | SliderEvent::Release(v)) = event;
                 this.zoom_to(f64::from(v.start()), cx);
-            });
-            self.subscriptions.push(sub);
+            }));
             self.zoom = Some(slider);
+        } else {
+            self.zoom = None;
+            self.zoom_events = None;
         }
         self.motion = Some(Motion::new(rig, SPEEDS, quirks::fov(vendor_id, product_id)));
         self.sleep_tilt = quirks::sleep_tilt(vendor_id, product_id);
+        self.health = ControlHealth::default();
+        self.last_zoom_sent = None;
+        self.controls_gen += 1;
+        let generation = self.controls_gen;
         let events = self.events.clone();
         self.queue = Some(ControlQueue::spawn(camera, move |event| {
             if let QueueEvent::Wrote(w) = &event
                 && let Err(e) = &w.result
             {
-                trace(&format!("{} = {:?} failed: {e}", w.control.key(), w.value));
+                trace(&format!(
+                    "{} = {:?} failed: {}",
+                    w.control.key(),
+                    w.value,
+                    crate::events::describe(e)
+                ));
             }
-            let _ = events.unbounded_send(event);
+            let _ = events.unbounded_send((generation, event));
         }));
         trace("controls ready");
-        // Put to sleep before the controls were ready: park now.
-        if self.sleep == (Sleep::Asleep { wake_aim: None }) {
+        // Asleep before the controls were ready, or carried over asleep
+        // from a reopened preview: park now. A carried-over aim to wake to
+        // is kept; the pose read just now is the parked one.
+        if let Sleep::Asleep { wake_aim } = self.sleep {
+            let parked_from = self.park();
             self.sleep = Sleep::Asleep {
-                wake_aim: self.park(),
+                wake_aim: wake_aim.or(parked_from),
             };
+        } else if let Sleep::Waking { aim: (pan, tilt) } = self.sleep
+            && let Some(motion) = self.motion.as_mut()
+        {
+            // Woken before these controls were ready, or across a reconnect
+            // or reopen: the aim may never have reached the camera.
+            let _ = motion.aim(pan, tilt);
+            self.send_aim();
+            // Already streaming, the camera is awake and obeys now; else the
+            // first frame sends the aim once more.
+            if self.status == Status::Live {
+                self.sleep = Sleep::Awake;
+            }
         }
         cx.notify();
     }
 
     /// Adopt positions the camera reports, unless the user moved it since
     /// the read was asked for, or is moving it now.
+    ///
+    /// Every result also says whether the control link still works; a dead
+    /// one is reopened.
     fn on_queue_event(&mut self, event: QueueEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let (verdict, error) = match &event {
+            QueueEvent::Wrote(w) => (self.health.record(&w.result), w.result.as_ref().err()),
+            QueueEvent::Read(r) => (self.health.record(&r.result), r.result.as_ref().err()),
+        };
+        match error {
+            // A working link: failed tries before it no longer count.
+            None => self.control_attempts = 0,
+            Some(error) if verdict == Verdict::Reconnect => {
+                let why = crate::events::describe(error);
+                self.lose_controls(&why, cx);
+                return;
+            }
+            Some(_) => {}
+        }
         let QueueEvent::Read(read) = event else {
             return;
         };
         // Until the post-wake aim goes out, the camera may still report
         // where it slept.
-        if self.ticking || self.sleep == Sleep::Waking || self.read_epoch != Some(self.writes) {
+        if self.ticking
+            || matches!(self.sleep, Sleep::Waking { .. })
+            || self.read_epoch != Some(self.writes)
+        {
             return;
         }
         let Some(motion) = self.motion.as_mut() else {
@@ -676,13 +867,73 @@ impl Preview {
             self.status = Status::Live;
             trace("first frame");
             cx.emit(PreviewEvent::Live(true));
-            if self.sleep == Sleep::Waking {
+            // Without a working link the aim waits for `controls_ready`.
+            if matches!(self.sleep, Sleep::Waking { .. }) && self.queue.is_some() {
                 self.sleep = Sleep::Awake;
                 trace("aiming again now the camera is awake");
                 self.send_aim();
             }
         }
         cx.notify();
+    }
+
+    /// The unique ID of the camera this preview shows. `None` while it
+    /// has no capture session: before the camera opens, after it failed,
+    /// or once it went away.
+    pub fn camera_id(&self) -> Option<&str> {
+        self.session.as_ref()?;
+        self.target_id()
+    }
+
+    /// The unique ID of the camera this preview was opened for, whether
+    /// or not it works: `None` only when there was no camera to open.
+    pub fn target_id(&self) -> Option<&str> {
+        self.device.as_ref().map(|d| d.unique_id.as_str())
+    }
+
+    /// Whether the camera is asleep, to carry over into a preview that
+    /// replaces this one for the same camera.
+    pub fn sleep_state(&self) -> Sleep {
+        self.sleep
+    }
+
+    /// Stop the camera for good, so another can take over. The returned
+    /// receiver fires once the capture queue has finished stopping, after
+    /// which dropping this preview does not block.
+    ///
+    /// A sleeping camera is left parked: the user chose another camera,
+    /// not to wake this one.
+    pub fn shut_down(&mut self, cx: &mut Context<Self>) -> futures::channel::oneshot::Receiver<()> {
+        let (tx, rx) = futures::channel::oneshot::channel::<()>();
+        trace("closing for another camera");
+        self.closing = true;
+        self.watchdog = None;
+        self.controls_task = None;
+        // Dropping the control queue joins its worker, which may be in the
+        // middle of a USB transfer (up to its timeout), so drop it off the
+        // UI thread.
+        if let Some(queue) = self.queue.take() {
+            cx.background_spawn(async move { drop(queue) }).detach();
+        }
+        self.frame = None;
+        if self.status == Status::Live {
+            cx.emit(PreviewEvent::Live(false));
+        }
+        self.status = Status::Starting;
+        self.running = false;
+        match &self.session {
+            Some(session) => {
+                session.stop();
+                session.when_idle(move || {
+                    let _ = tx.send(());
+                });
+            }
+            None => {
+                let _ = tx.send(());
+            }
+        }
+        cx.notify();
+        rx
     }
 
     /// The screen saver or lock screen came or went.
@@ -743,10 +994,13 @@ impl Preview {
         };
         trace("camera awake");
         self.sleep = Sleep::Awake;
-        if let (Some((pan, tilt)), Some(motion)) = (wake_aim, self.motion.as_mut()) {
-            let _ = motion.aim(pan, tilt);
-            self.send_aim();
-            self.sleep = Sleep::Waking;
+        if let Some((pan, tilt)) = wake_aim {
+            // Without controls yet, `controls_ready` aims.
+            if let Some(motion) = self.motion.as_mut() {
+                let _ = motion.aim(pan, tilt);
+                self.send_aim();
+            }
+            self.sleep = Sleep::Waking { aim: (pan, tilt) };
         }
         cx.emit(PreviewEvent::Asleep(false));
         self.refresh_streaming(cx);
@@ -828,7 +1082,7 @@ impl Preview {
         }
         // A rebuild under way starts streaming itself once the new
         // session is up; starting the old one would race it.
-        if self.rebuilding {
+        if self.rebuilding || self.closing {
             return;
         }
         session.start_fresh();
@@ -1389,14 +1643,40 @@ fn with_retries<T, E>(read: impl Fn() -> Result<T, E>) -> Result<T, E> {
     last
 }
 
+/// The current value and range of `control`, read with retries. `None`
+/// when the camera does not have the control or refuses the reads; an
+/// error when it did not answer at all.
+fn read_control(
+    camera: &UsbCamera,
+    control: Control,
+    what: &str,
+) -> Result<Option<(Value, ControlRange)>, String> {
+    if !camera.topology().supports(control) {
+        return Ok(None);
+    }
+    let no_answer = |e: &CameraError| matches!(e, CameraError::Request { source, .. } if !matches!(source, TransportError::Stall));
+    let describe = |e: &CameraError| format!("reading {what}: {}", crate::events::describe(e));
+    let now = match with_retries(|| camera.get(control)) {
+        Ok(now) => now,
+        Err(e) if no_answer(&e) => return Err(describe(&e)),
+        Err(_) => return Ok(None),
+    };
+    match with_retries(|| camera.range(control)) {
+        Ok(range) => Ok(Some((now, range))),
+        Err(e) if no_answer(&e) => Err(describe(&e)),
+        Err(_) => Ok(None),
+    }
+}
+
 /// Find, open and read the USB camera at `identity`. Blocking; call from a
-/// background task.
-fn open_usb_camera((location, vid, pid): (u32, u16, u16)) -> Option<(UsbCamera, Initial)> {
-    let cameras = camctl_usb::list_cameras().ok()?;
+/// background task. The error says why, for the log.
+fn open_usb_camera((location, vid, pid): (u32, u16, u16)) -> Result<(UsbCamera, Initial), String> {
+    let cameras = camctl_usb::list_cameras().map_err(|e| crate::events::describe(&e))?;
     let info = cameras
         .iter()
-        .find(|c| c.location_id == location && c.vendor_id == vid && c.product_id == pid)?;
-    let camera = info.open().ok()?;
+        .find(|c| c.location_id == location && c.vendor_id == vid && c.product_id == pid)
+        .ok_or_else(|| format!("{vid:04x}:{pid:04x} is not on the bus at {location:#010x}"))?;
+    let camera = info.open().map_err(|e| crate::events::describe(&e))?;
     let mut rig = Rig {
         pan: 0.0,
         tilt: 0.0,
@@ -1406,10 +1686,17 @@ fn open_usb_camera((location, vid, pid): (u32, u16, u16)) -> Option<(UsbCamera, 
         zoom_limits: Limits::new(0.0, 0.0),
         pan_sign: quirks::pan_sign(vid),
     };
+    // Fail only when nothing the camera has answered (as opposed to
+    // refused): the link is not working yet, a camera still waking, say,
+    // and the open is tried again. A camera that answers zoom but not pan
+    // and tilt opens with zoom.
+    let pan_tilt = read_control(&camera, Control::PanTiltAbsolute, "pan and tilt");
+    let zoom = read_control(&camera, Control::ZoomAbsolute, "zoom");
+    if let (Err(e), Err(_) | Ok(None)) | (Ok(None), Err(e)) = (&pan_tilt, &zoom) {
+        return Err(e.clone());
+    }
     let mut can_aim = false;
-    if camera.topology().supports(Control::PanTiltAbsolute)
-        && let Ok(now) = with_retries(|| camera.get(Control::PanTiltAbsolute))
-        && let Ok(range) = with_retries(|| camera.range(Control::PanTiltAbsolute))
+    if let Ok(Some((now, range))) = pan_tilt
         && let (Some(now), Some(lo), Some(hi)) = (
             now.pan_tilt_degrees(),
             range.min.and_then(|v| v.pan_tilt_degrees()),
@@ -1428,10 +1715,7 @@ fn open_usb_camera((location, vid, pid): (u32, u16, u16)) -> Option<(UsbCamera, 
     }
     let mut zoom_step = 1.0;
     let mut can_zoom = false;
-    if camera.topology().supports(Control::ZoomAbsolute)
-        && let Ok(Value::Int(now)) = with_retries(|| camera.get(Control::ZoomAbsolute))
-        && let Ok(range) = with_retries(|| camera.range(Control::ZoomAbsolute))
-    {
+    if let Ok(Some((Value::Int(now), range))) = zoom {
         #[expect(clippy::cast_precision_loss, reason = "zoom units are small integers")]
         let (min, max, step, now) = (
             range.min.and_then(|v| v.as_int()).unwrap_or(0) as f64,
@@ -1446,7 +1730,7 @@ fn open_usb_camera((location, vid, pid): (u32, u16, u16)) -> Option<(UsbCamera, 
             can_zoom = true;
         }
     }
-    Some((
+    Ok((
         camera,
         Initial {
             rig,
@@ -1578,11 +1862,15 @@ impl Render for Preview {
                     ))
                 })
                 .when(!self.asleep(), |this| {
-                    this.child(
-                        div()
-                            .text_color(hsla(0., 0., 1., 0.35))
-                            .child("drag to look · click to aim · scroll to zoom"),
-                    )
+                    this.child(div().text_color(hsla(0., 0., 1., 0.35)).child(
+                        if self.queue.is_some() {
+                            "drag to look · click to aim · scroll to zoom"
+                        } else if self.controls_task.is_some() {
+                            "reconnecting to the camera's controls…"
+                        } else {
+                            "controls lost · choose Reconnect Camera in the menu"
+                        },
+                    ))
                 })
                 .child(self.sleep_button(cx))
         });

@@ -109,8 +109,13 @@ The workspace produces two programs:
 ### Menu bar icon
 
 - The icon is a gimbal camera drawn in code as a template image, so it follows the menu bar's light or dark appearance. The lens fills while frames are streaming.
-- Left click shows or hides the preview. Right click or Control-click opens a menu with **Show or Hide Preview**, **Sleep Camera** (**Wake Camera** while it sleeps) and **Quit camctl**.
+- Left click shows or hides the preview. Right click or Control-click opens a menu with **Show or Hide Preview**, **Camera** (see [Choosing the camera](#choosing-the-camera)), **Sleep Camera** (**Wake Camera** while it sleeps), **Reconnect Camera** (see [Reconnecting](#reconnecting)) and **Quit camctl**.
+- **Quit camctl** stops the camera, then quits. If the camera has not stopped within about 2 s, camctl quits without it.
 - The app has no Dock icon.
+
+### One camctl at a time
+
+Only one camctl runs at a time, whichever copy is launched: an installed app and a fresh build, say. A second launch adds no menu bar icon. It asks the running camctl to show its preview, then quits. The running camctl holds a lock on `~/Library/Application Support/camctl/instance.lock` for as long as it runs, and the system releases the lock when the process exits, crashed or not. If the lock cannot be taken at all, camctl runs anyway.
 
 ### Preview window
 
@@ -149,13 +154,33 @@ The **Sleep** button at the right of the bar, or **Sleep Camera** in the menu ba
 - camctl stops its capture session, and the window says the camera is asleep.
 - Keys, drags, clicks, scrolling, the pad and the zoom slider are ignored until the camera wakes.
 
-**Wake**, or **Wake Camera** in the menu, aims the camera back where it pointed and resumes the preview if the window can be seen. Sleep lasts until you wake the camera. Hiding and showing the window does not wake it.
+**Wake**, or **Wake Camera** in the menu, aims the camera back where it pointed and resumes the preview if the window can be seen. Sleep lasts until you wake the camera. Hiding and showing the window does not wake it, and neither does camctl reopening the camera after it reconnects.
 
 On a Tiny 2 Lite, the lens tilts to -80 degrees, and the camera then tips the rest of the way down by itself and enters its own sleep. That is the same sleep that OBSBOT Center offers, reached through the standard pan-tilt control only. A sleeping Tiny 2 Lite ignores pan and tilt until an app opens its video. On waking, camctl sends the aim again with the first frame.
 
 Other apps that use the camera keep streaming from it. Sleep stops only camctl's preview, so the camera light stays on while another app streams.
 
 The Sleep button sits in the bar, which appears only for a camera that camctl controls over USB. The menu item works for every camera. A camera without absolute pan and tilt does not move, so Sleep only stops the preview and Wake only resumes it. camctl does not remember sleep across launches. It starts awake, and if you quit while the camera sleeps, it does not aim the camera back.
+
+### Choosing the camera
+
+The **Camera** submenu in the menu bar menu lists every connected camera, USB and built in, with a check beside the one the preview shows. The list is read each time the menu opens, so a camera plugged in a moment ago appears. Two cameras with the same name are numbered, in the order macOS lists them.
+
+Choosing another camera stops the current one, then opens the new one in the same window and shows the preview. The old camera stays where it points, and the new camera's aim and zoom are read from it. camctl remembers each camera's sleep while it runs, so the new camera starts awake unless it was asleep when camctl last showed it. The controls, pad and Sleep button follow what the new camera supports. Choosing the checked camera again shows the preview, and reopens the camera if camctl could not open it.
+
+camctl remembers the choice across launches, by the camera's AVFoundation unique ID, in its user defaults (`defaults read us.ainslies.camctl camera`). A USB camera's ID includes its USB location, so the same camera plugged into another port counts as a different one. When the chosen camera is not connected at launch, camctl falls back to the first USB camera, or else the first camera of any kind, and keeps the choice. When the chosen camera is connected later, the preview switches to it. To forget the choice:
+
+```sh
+defaults delete us.ainslies.camctl camera
+```
+
+### Reconnecting
+
+camctl follows cameras as they are connected, disconnected and re-enumerated. A Mac waking from sleep often re-enumerates its USB cameras, which leaves every handle camctl held to them dead.
+
+- **The preview.** Once the connected cameras have stayed the same for about 1 s, camctl reopens the preview on the camera it should show: the chosen camera, else the first USB camera, else the built-in camera. It also reopens a camera that disconnected and came back, and one camctl could not open. The camera the preview shows gets about 4 s to come back before camctl falls back to another. A preview camctl reopens by itself does not bring the window forward, and while the window is hidden the camera stays off. A sleeping camera stays asleep across the reopen.
+- **The controls.** Pan, tilt and zoom go over a USB control link, which can die while the video still works. When the camera stops answering control requests (three failures in a row, or one that says the device is gone), camctl drops the link and opens it again. The first try waits 0.5 s, and each wait doubles up to 5 s, for up to 8 tries. camctl also reopens the link each time the Mac wakes. Meanwhile input moves nothing, and the bar below the video says "reconnecting to the camera's controls…". If every try fails, the bar says "controls lost · choose Reconnect Camera in the menu".
+- **Reconnect Camera.** The menu item closes the camera, capture and controls both, opens it afresh and shows the preview. Use it when the controls are lost or the preview is stuck.
 
 ## Installing a release
 
@@ -171,8 +196,8 @@ export HOMEBREW_GITHUB_API_TOKEN="$(gh auth token)"
 brew install --cask yaklabco/tap/camctl
 ```
 
-The cask installs `camctl.app` into `/Applications`, clears the download
-quarantine (see below), and pulls in the `camctl-cli` formula, which puts
+The cask installs `camctl.app` into `/Applications` and pulls in the
+`camctl-cli` formula, which puts
 `camctl` on the `PATH`. `brew upgrade` needs the same token. Upgrading
 and uninstalling quit the app first, and macOS asks once whether your
 terminal may control camctl.
@@ -189,10 +214,9 @@ Each [release](https://github.com/jamesainslie/camctl/releases) carries:
 - `camctl-cli-X.Y.Z-macos-arm64.tar.gz`, the CLI,
 - `SHA256SUMS`.
 
-Unzip the app into `/Applications`. Release builds are ad-hoc signed unless
-the repository has Developer ID secrets (see
-[docs/RELEASING.md](docs/RELEASING.md)), so clear the download quarantine
-once:
+Unzip the app into `/Applications`. Releases are Developer ID signed and
+notarized, so Gatekeeper opens them as downloaded. Releases up to 0.1.1
+were ad-hoc signed; for one of those, clear the download quarantine once:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/camctl.app
@@ -325,9 +349,9 @@ Negative values parse as values, not flags, so `camctl point -20 5` and `camctl 
 | `crates/uvc` (`camctl-uvc`) | UVC descriptor parsing, the control catalogue, wire encoding of values, and `Camera`, which drives controls through a `Transport` trait. No I/O |
 | `crates/usb` (`camctl-usb`) | `Transport` over nusb (IOKit): finds devices with a UVC video control interface and sends class requests on the default control pipe, 500 ms timeout |
 | `crates/capture` (`camctl-capture`) | AVFoundation devices, camera permission, the stream format policy, and a capture session that keeps only the newest frame |
-| `crates/core` (`camctl-core`) | UI-independent logic: the motion model, including the sleep aim, the per-camera quirks table and `ControlQueue` |
+| `crates/core` (`camctl-core`) | UI-independent logic: the motion model, including the sleep aim, the per-camera quirks table, `ControlQueue` and the control-link health check |
 | `crates/cli` (`camctl-cli`) | The `camctl` binary |
-| `crates/app` (`camctl-app`) | The GPUI app (through gpui-kit): preview window, AppKit menu bar item, screen saver and lock watcher |
+| `crates/app` (`camctl-app`) | The GPUI app (through gpui-kit): preview window, AppKit menu bar item, screen saver and lock watcher, camera connect and Mac wake watcher, and the one-instance lock |
 
 ```mermaid
 flowchart TD
@@ -358,9 +382,9 @@ flowchart TD
 
 **Frame path.** The capture session's video output asks AVFoundation for 420f, Metal-compatible pixel buffers and discards late frames. Its delegate runs on a serial dispatch queue and replaces the contents of a one-frame slot. It wakes the UI thread only when it fills an empty slot, so at most one wake-up is outstanding however fast frames arrive. The UI thread takes the frame and passes its pixel buffer to GPUI's `surface` element, drawn with object-fit cover. Buffers in any other pixel format are dropped, because GPUI's surface renderer accepts only 420f.
 
-**Control path.** While input is held, the app ticks the motion model every 33 ms. Each tick ramps the velocity toward the held speed and advances absolute pan, tilt and zoom targets. Releasing stops the targets at once, and the motor's own lag brings the camera to rest. Clicks, scroll steps, the slider, Home, Sleep and Wake produce single targets. Targets go to `ControlQueue`, which keeps only the newest value per control. A worker thread sends whatever is pending, so a burst of requests collapses to the write in flight plus the final value. Reads queue the same way and run after the pending writes. Control transfers use the default pipe and need no exclusive access, so they work while the system driver owns the camera and other apps stream from it.
+**Control path.** While input is held, the app ticks the motion model every 33 ms. Each tick ramps the velocity toward the held speed and advances absolute pan, tilt and zoom targets. Releasing stops the targets at once, and the motor's own lag brings the camera to rest. Clicks, scroll steps, the slider, Home, Sleep and Wake produce single targets. Targets go to `ControlQueue`, which keeps only the newest value per control. A worker thread sends whatever is pending, in the order of each control's latest request, so a burst of requests collapses to the write in flight plus the final value, and dependent writes keep their order: auto focus off, then a manual focus. Reads queue the same way and run after the pending writes. Every result goes to a health check. Three failures in a row, or one that says the device is gone, mark the link dead, and the app drops the queue and opens the camera's USB device again with backoff. A stall is an answer, so it does not count. Control transfers use the default pipe and need no exclusive access, so they work while the system driver owns the camera and other apps stream from it.
 
-**Pairing.** The app previews the first USB camera AVFoundation lists, or the first camera of any kind. For a UVC camera, AVFoundation's unique ID encodes the IOKit location ID, vendor ID and product ID, and the app opens the nusb device that matches all three. Enumeration and the first reads run off the UI thread, and each first read is tried up to 4 times, 150 ms apart, because a camera that is starting its stream can stall or time out briefly.
+**Pairing.** The app previews the camera chosen in the **Camera** menu if it is connected, otherwise the first USB camera AVFoundation lists, or the first camera of any kind. Switching cameras stops the old capture session off the UI thread, then replaces the window's preview view with a new one, so no per-camera state carries over except sleep. The app watches AVFoundation's camera connect and disconnect notifications and the Mac's wake notification. Once the cameras have settled, it makes the same choice again and replaces the preview the same way when the answer differs, when the shown camera re-enumerated, or when it could not be opened. For a UVC camera, AVFoundation's unique ID encodes the IOKit location ID, vendor ID and product ID, and the app opens the nusb device that matches all three. Enumeration and the first reads run off the UI thread, and each first read is tried up to 4 times, 150 ms apart, because a camera that is starting its stream can stall or time out briefly. A camera that does not answer the pan, tilt or zoom reads at all fails the open, which is then tried again, rather than opening without those controls.
 
 ## Development
 
@@ -398,8 +422,10 @@ The tests need no camera:
   Tiny 2 Lite (`crates/uvc/tests/fixtures`) and drive `Camera` through fake
   transports.
 - The `core` tests cover the motion model and the sleep aim, the click and
-  drag geometry, the per-camera quirks, and the queue's coalescing.
-- The `capture` tests cover the format policy and the frame hand-off.
+  drag geometry, the per-camera quirks, the queue's coalescing and order,
+  and the control-link health check and its backoff.
+- The `capture` tests cover the format policy, the frame hand-off, the
+  camera choice and when the preview follows the connected cameras.
 - The `xtask` tests cover changelog parsing and consistency, the semver
   rules, the workspace manifest rules and the tool pins.
 
@@ -511,8 +537,11 @@ procedure, including Developer ID signing and notarization, is in
 
 ## Troubleshooting
 
-camctl records state changes (camera opened, paused and why, resumed,
-restarted, put to sleep and woken, failed control writes) in `~/Library/Logs/camctl/camctl.log`:
+camctl records state changes in `~/Library/Logs/camctl/camctl.log`: camera
+opened, paused and why, resumed, restarted, put to sleep and woken, cameras
+connected and disconnected, the Mac waking, and control links lost and
+reopened. A failed request is logged with its cause, for example
+`Zoom: SET_CUR failed: device disconnected`.
 
 ```sh
 tail -f ~/Library/Logs/camctl/camctl.log
@@ -520,6 +549,8 @@ tail -f ~/Library/Logs/camctl/camctl.log
 
 If the stream stalls, the app restarts it, then rebuilds the capture
 session, and says so in the window if the camera still sends no video.
+If the camera or its controls stay lost, choose **Reconnect Camera** in
+the menu bar menu.
 
 ## Notes and limitations
 
@@ -532,8 +563,8 @@ session, and says so in the window if the camera still sends no video.
 - **Sleep tilt.** The Tiny 2 Lite reports a tilt range of -90 to 90 degrees but ignores tilts below about -84 degrees, and it ignores the whole tilt part of the request, not just the excess. The quirks table gives it a sleep tilt of -80 degrees. Other cameras tilt to the bottom of the range they report.
 - **Click to focus.** UVC 1.1 has no focus-point control. A click aims the camera at the point, and the camera's continuous autofocus then focuses on what is now centred. This requires autofocus to be on, for example with `camctl set focus-auto on`.
 - **Lens geometry.** Click-to-aim needs the lens's field of view. The quirks table knows the Tiny 2 Lite (67.2 degrees horizontal, 1x to 4x zoom). Other cameras get a typical webcam guess (70 degrees, no assumed zoom magnification), so a click lands close and a second click refines it. The aim rotates the clicked ray by the current tilt, so corners and tilted views aim correctly.
-- **Camera choice.** The app has no camera picker. A built-in camera, used only when no USB camera is present, gets a preview without controls. The CLI selects cameras with `-c`.
-- **USB access.** nusb opens a device exclusively when it can and falls back to shared access when the system driver has claimed it, which is the usual case for a camera. Quit camctl before running a vendor firmware updater that needs the device to itself.
+- **Camera choice.** A built-in camera gets a preview without controls. The CLI selects cameras with `-c`, by index, and does not read the app's choice.
+- **USB access.** nusb takes the device-level exclusive open when no other process holds it, and falls back to shared access when one does. The system camera driver does not hold it, so camctl usually gets it: `ioreg` then lists camctl as the camera's `UsbExclusiveOwner`. Streaming is unaffected, in camctl and in other apps. A vendor firmware updater that needs the device to itself does not get it, so quit camctl before running one.
 - **UVC coverage.** camctl reads the first video function of a device, addresses the first processing unit, and omits the analog video controls and the UVC 1.5 additions.
 
 ## License

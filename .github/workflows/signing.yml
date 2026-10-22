@@ -1,0 +1,109 @@
+name: signing
+
+# A release rehearsal: build, Developer ID sign, notarize and verify the
+# app exactly as the release workflow does, and publish nothing. It runs
+# when a pull request touches the signing path, and by hand, so broken
+# secrets or a changed runner image show up before a tag does.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/release.yml"
+      - ".github/workflows/signing.yml"
+      - "scripts/bundle.sh"
+      - "scripts/camctl.entitlements"
+      - "scripts/verify-signed.sh"
+      - "xtask/src/main.rs"
+  workflow_dispatch:
+
+concurrency:
+  group: signing-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+  RUST_LIB_BACKTRACE: "0"
+
+jobs:
+  rehearse:
+    name: sign, notarize and verify the app
+    # Pull requests from forks get no secrets; there is nothing to rehearse.
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - name: Require the signing and notarization secrets
+        env:
+          HAS_P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 != '' }}
+          HAS_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_PASSWORD != '' }}
+          HAS_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_IDENTITY != '' }}
+          HAS_APPLE_ID: ${{ secrets.APPLE_ID != '' }}
+          HAS_TEAM_ID: ${{ secrets.APPLE_TEAM_ID != '' }}
+          HAS_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD != '' }}
+        run: |
+          set -euo pipefail
+          missing=0
+          for pair in \
+            "HAS_P12 APPLE_DEVELOPER_ID_P12" \
+            "HAS_P12_PASSWORD APPLE_DEVELOPER_ID_PASSWORD" \
+            "HAS_IDENTITY APPLE_DEVELOPER_ID_IDENTITY" \
+            "HAS_APPLE_ID APPLE_ID" \
+            "HAS_TEAM_ID APPLE_TEAM_ID" \
+            "HAS_APP_PASSWORD APPLE_APP_PASSWORD"; do
+            read -r flag secret <<<"$pair"
+            if [ "${!flag}" != "true" ]; then
+              echo "::error::the $secret secret is not set; see docs/RELEASING.md"
+              missing=1
+            fi
+          done
+          exit "$missing"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - name: Install the tools pinned in mise.toml
+        uses: jdx/mise-action@9b200bcecbfd6303e69a4a261b2e09e3757440a7 # v5.2.0
+        with:
+          cache: false
+
+      - name: Import the Developer ID certificate
+        env:
+          P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_PASSWORD }}
+          IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_IDENTITY }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          echo "$P12" | base64 --decode > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -P "$P12_PASSWORD" \
+            -A -t cert -f pkcs12 -k "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" login.keychain-db
+          rm "$RUNNER_TEMP/cert.p12"
+          echo "CAMCTL_SIGN_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+
+      - name: Build, sign and notarize the app, and build the CLI
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: cargo xtask dist
+
+      - name: Show Gatekeeper's state on this runner
+        run: spctl --status || true
+
+      - name: Verify the app is signed, notarized and accepted by Gatekeeper
+        run: scripts/verify-signed.sh dist/camctl.app
