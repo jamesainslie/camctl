@@ -16,21 +16,38 @@ fn pending_keeps_only_the_latest_value_per_control() {
     assert_eq!(
         p.drain(),
         vec![
-            (Control::ZoomAbsolute, Value::Int(40)),
-            (Control::Gain, Value::Int(5))
+            (Control::Gain, Value::Int(5)),
+            (Control::ZoomAbsolute, Value::Int(40))
         ]
     );
     assert!(p.drain().is_empty());
 }
 
 #[test]
-fn pending_drains_in_first_request_order() {
+fn pending_drains_in_latest_request_order() {
     let mut p = Pending::default();
     p.insert(Control::Gain, Value::Int(1));
     p.insert(Control::ZoomAbsolute, Value::Int(2));
     p.insert(Control::Gain, Value::Int(3));
     let order: Vec<Control> = p.drain().into_iter().map(|(c, _)| c).collect();
-    assert_eq!(order, [Control::Gain, Control::ZoomAbsolute]);
+    assert_eq!(order, [Control::ZoomAbsolute, Control::Gain]);
+}
+
+#[test]
+fn a_manual_value_sent_after_turning_auto_off_still_lands_last() {
+    // Focus while auto focus is on stalls, so turning auto off must go
+    // first when the manual value was asked for after it.
+    let mut p = Pending::default();
+    p.insert(Control::FocusAbsolute, Value::Int(10));
+    p.insert(Control::FocusAuto, Value::Int(0));
+    p.insert(Control::FocusAbsolute, Value::Int(20));
+    assert_eq!(
+        p.drain(),
+        vec![
+            (Control::FocusAuto, Value::Int(0)),
+            (Control::FocusAbsolute, Value::Int(20))
+        ]
+    );
 }
 
 /// A transport that blocks each write until the test releases it, so the
