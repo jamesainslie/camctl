@@ -116,7 +116,18 @@ entitlement in `scripts/camctl.entitlements` whenever the identity is a
 Developer ID one, and `cargo xtask dist` notarizes and staples the app
 before zipping it.
 
+The `signing` workflow rehearses that path, build, sign, notarize and
+verify, and publishes nothing. It runs on pull requests that touch the
+signing scripts or workflows, and by hand with
+`gh workflow run signing.yml --ref <branch>`. Run it after changing any
+secret.
+
 ### A signed release built locally
+
+Behind a proxy that intercepts plain HTTP (Zscaler, for one), codesign
+cannot reach Apple's timestamp server and fails with "A timestamp was
+expected but was not found". Sign on another network, or let the
+`signing` workflow do it.
 
 To build and check a release on your own Mac, with the Developer ID
 certificate in the login keychain, save the notary credentials in the
