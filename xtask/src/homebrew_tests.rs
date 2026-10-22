@@ -77,16 +77,17 @@ fn the_cask_installs_the_app_from_the_private_release() {
 }
 
 #[test]
-fn the_cask_clears_the_quarantine_that_blocks_ad_hoc_builds() {
+fn the_cask_leaves_the_quarantine_to_gatekeeper() {
+    // Releases are Developer ID signed and notarized, so Gatekeeper passes
+    // them with the download quarantine set; clearing it would only switch
+    // the check off.
     let cask = cask(&v("0.1.1"), APP_SHA);
-    for want in [
-        "postflight do",
-        "system_command \"/usr/bin/xattr\",",
-        "args: [\"-dr\", \"com.apple.quarantine\", \"#{appdir}/camctl.app\"]",
-        "zap trash: \"~/Library/Logs/camctl\"",
-    ] {
-        assert!(cask.contains(want), "missing {want:?} in:\n{cask}");
-    }
+    assert!(!cask.contains("quarantine"), "{cask}");
+    assert!(!cask.contains("postflight"), "{cask}");
+    assert!(
+        cask.contains("zap trash: \"~/Library/Logs/camctl\""),
+        "{cask}"
+    );
 }
 
 #[test]

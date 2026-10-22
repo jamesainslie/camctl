@@ -92,14 +92,15 @@ that can read it.
 
 ## Signing and notarization
 
-Without secrets, the release app is ad-hoc signed. It runs, but Gatekeeper
-quarantines it when downloaded. Clear the quarantine with
-`xattr -dr com.apple.quarantine camctl.app`, or build locally with
-`scripts/bundle.sh`. macOS also asks for camera access again after each
-update, because an ad-hoc signature changes with every build.
+Every release is Developer ID signed, with the hardened runtime and the
+camera entitlement, and notarized with the ticket stapled. The release
+workflow fails at its first step when any secret below is missing, and
+`scripts/verify-signed.sh` must pass before anything is published. An
+ad-hoc build would be blocked by Gatekeeper when downloaded, and macOS
+would ask for camera access again after every update, because an ad-hoc
+signature changes with every build.
 
-To publish Developer ID signed and notarized builds, add these repository
-secrets:
+The repository secrets:
 
 | Secret | Value |
 |---|---|
@@ -110,7 +111,31 @@ secrets:
 | `APPLE_TEAM_ID` | The team ID |
 | `APPLE_APP_PASSWORD` | An app-specific password for that Apple ID |
 
-With the signing secrets set, `scripts/bundle.sh` signs with the hardened
-runtime and the camera entitlement in `scripts/camctl.entitlements`. With
-the notarization secrets as well, `cargo xtask dist` notarizes and staples
-the app before zipping it.
+`scripts/bundle.sh` signs with the hardened runtime and the camera
+entitlement in `scripts/camctl.entitlements` whenever the identity is a
+Developer ID one, and `cargo xtask dist` notarizes and staples the app
+before zipping it.
+
+### A signed release built locally
+
+To build and check a release on your own Mac, with the Developer ID
+certificate in the login keychain, save the notary credentials in the
+keychain once:
+
+```sh
+xcrun notarytool store-credentials camctl-notary \
+  --apple-id you@example.com --team-id TEAMID
+```
+
+It asks for the app-specific password. Then:
+
+```sh
+CAMCTL_SIGN_IDENTITY="Developer ID Application: Name (TEAMID)" \
+CAMCTL_NOTARY_PROFILE=camctl-notary \
+  cargo xtask dist
+scripts/verify-signed.sh dist/camctl.app
+```
+
+`CAMCTL_NOTARY_PROFILE` takes precedence over `APPLE_ID`, so no password
+is ever in the environment. Day-to-day builds keep using the Apple
+Development identity, which `scripts/bundle.sh` picks by default.

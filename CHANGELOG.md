@@ -25,6 +25,12 @@ anything else bumps the patch; see [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Changed
 
+- Releases are Developer ID signed and notarized, so Gatekeeper opens a
+  downloaded camctl and the camera permission survives updates. The
+  release workflow refuses to publish without the signing and notary
+  secrets, or an app that `scripts/verify-signed.sh` rejects. The cask no
+  longer clears the download quarantine. Local releases can notarize with
+  a keychain profile, `CAMCTL_NOTARY_PROFILE`.
 - Quit stops the camera, then quits, and leaves within about 2 s even if
   the camera does not stop.
 - The event log records why a request failed (for example

@@ -756,6 +756,35 @@ fn verify_tag(tag: &str) -> Result<()> {
     Ok(())
 }
 
+/// How `notarytool` signs in to Apple's notary service.
+#[derive(Debug, PartialEq, Eq)]
+enum Notary {
+    /// A keychain profile saved by `xcrun notarytool store-credentials`,
+    /// named by `CAMCTL_NOTARY_PROFILE`: for releases built locally, with
+    /// no password in the environment.
+    Profile(String),
+    /// `APPLE_ID`, `APPLE_TEAM_ID` and `APPLE_APP_PASSWORD`: for CI.
+    AppleId {
+        id: String,
+        team: String,
+        password: String,
+    },
+}
+
+/// The notary credentials `var` provides, if complete. A profile wins;
+/// an empty variable counts as unset.
+fn notary(var: impl Fn(&str) -> Option<String>) -> Option<Notary> {
+    let set = |name: &str| var(name).filter(|v| !v.is_empty());
+    if let Some(profile) = set("CAMCTL_NOTARY_PROFILE") {
+        return Some(Notary::Profile(profile));
+    }
+    Some(Notary::AppleId {
+        id: set("APPLE_ID")?,
+        team: set("APPLE_TEAM_ID")?,
+        password: set("APPLE_APP_PASSWORD")?,
+    })
+}
+
 fn dist() -> Result<()> {
     let version = current_version()?;
     let arch = match std::env::consts::ARCH {
@@ -786,29 +815,39 @@ fn dist() -> Result<()> {
     };
     zip_app(&app_zip)?;
 
-    // Notarize when Developer ID credentials are present (CI secrets).
-    if let (Ok(id), Ok(team), Ok(password)) = (
-        std::env::var("APPLE_ID"),
-        std::env::var("APPLE_TEAM_ID"),
-        std::env::var("APPLE_APP_PASSWORD"),
-    ) {
-        run_masked(
-            "xcrun",
-            &[
-                "notarytool",
-                "submit",
-                &app_zip,
-                "--apple-id",
-                &id,
-                "--team-id",
-                &team,
-                "--password",
-                &password,
-                "--wait",
-            ],
-            &[],
-            &[&password],
-        )?;
+    // Notarize when credentials are present: a keychain profile locally,
+    // the Apple ID secrets on CI.
+    if let Some(credentials) = notary(|name| std::env::var(name).ok()) {
+        match &credentials {
+            Notary::Profile(profile) => run(
+                "xcrun",
+                &[
+                    "notarytool",
+                    "submit",
+                    &app_zip,
+                    "--keychain-profile",
+                    profile,
+                    "--wait",
+                ],
+            )?,
+            Notary::AppleId { id, team, password } => run_masked(
+                "xcrun",
+                &[
+                    "notarytool",
+                    "submit",
+                    &app_zip,
+                    "--apple-id",
+                    id,
+                    "--team-id",
+                    team,
+                    "--password",
+                    password,
+                    "--wait",
+                ],
+                &[],
+                &[password],
+            )?,
+        }
         run("xcrun", &["stapler", "staple", "dist/camctl.app"])?;
         std::fs::remove_file(root().join(&app_zip))?;
         zip_app(&app_zip)?;
@@ -865,11 +904,60 @@ fn main() -> Result<()> {
 mod tests {
     use clap::CommandFactory as _;
 
-    use super::{Cli, all_passed, escape_data, escape_property};
+    use super::{Cli, Notary, all_passed, escape_data, escape_property, notary};
 
     #[test]
     fn the_command_line_definition_is_valid() {
         Cli::command().debug_assert();
+    }
+
+    fn env<'a>(vars: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |name| {
+            vars.iter()
+                .find(|(k, _)| *k == name)
+                .map(|(_, v)| (*v).to_owned())
+        }
+    }
+
+    #[test]
+    fn a_keychain_profile_notarizes_without_a_password_in_the_environment() {
+        let vars = [
+            ("CAMCTL_NOTARY_PROFILE", "camctl-notary"),
+            ("APPLE_ID", "me@example.com"),
+        ];
+        assert_eq!(
+            notary(env(&vars)),
+            Some(Notary::Profile("camctl-notary".into()))
+        );
+    }
+
+    #[test]
+    fn an_apple_id_needs_its_team_and_password() {
+        let all = [
+            ("APPLE_ID", "me@example.com"),
+            ("APPLE_TEAM_ID", "TEAM123456"),
+            ("APPLE_APP_PASSWORD", "abcd-efgh"),
+        ];
+        assert_eq!(
+            notary(env(&all)),
+            Some(Notary::AppleId {
+                id: "me@example.com".into(),
+                team: "TEAM123456".into(),
+                password: "abcd-efgh".into(),
+            })
+        );
+        let partial = [
+            ("APPLE_ID", "me@example.com"),
+            ("APPLE_TEAM_ID", "TEAM123456"),
+        ];
+        assert_eq!(notary(env(&partial)), None);
+        let empty = [
+            ("APPLE_ID", "me@example.com"),
+            ("APPLE_TEAM_ID", "TEAM123456"),
+            ("APPLE_APP_PASSWORD", ""),
+        ];
+        assert_eq!(notary(env(&empty)), None);
+        assert_eq!(notary(env(&[("CAMCTL_NOTARY_PROFILE", "")])), None);
     }
 
     #[test]

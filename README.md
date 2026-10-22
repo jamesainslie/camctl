@@ -196,8 +196,8 @@ export HOMEBREW_GITHUB_API_TOKEN="$(gh auth token)"
 brew install --cask yaklabco/tap/camctl
 ```
 
-The cask installs `camctl.app` into `/Applications`, clears the download
-quarantine (see below), and pulls in the `camctl-cli` formula, which puts
+The cask installs `camctl.app` into `/Applications` and pulls in the
+`camctl-cli` formula, which puts
 `camctl` on the `PATH`. `brew upgrade` needs the same token. Upgrading
 and uninstalling quit the app first, and macOS asks once whether your
 terminal may control camctl.
@@ -214,10 +214,9 @@ Each [release](https://github.com/jamesainslie/camctl/releases) carries:
 - `camctl-cli-X.Y.Z-macos-arm64.tar.gz`, the CLI,
 - `SHA256SUMS`.
 
-Unzip the app into `/Applications`. Release builds are ad-hoc signed unless
-the repository has Developer ID secrets (see
-[docs/RELEASING.md](docs/RELEASING.md)), so clear the download quarantine
-once:
+Unzip the app into `/Applications`. Releases are Developer ID signed and
+notarized, so Gatekeeper opens them as downloaded. Releases up to 0.1.1
+were ad-hoc signed; for one of those, clear the download quarantine once:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/camctl.app
