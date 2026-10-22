@@ -162,6 +162,20 @@ fn range_keeps_what_the_device_answers_when_some_requests_stall() {
 }
 
 #[test]
+fn a_short_answer_to_an_optional_request_loses_only_that_part() {
+    // Some cameras answer GET_RES or GET_DEF with an empty packet; the
+    // limits they did report still count.
+    let t = FakeTransport::default()
+        .answer(GetMin, ZOOM, CT, &[0, 0])
+        .answer(GetMax, ZOOM, CT, &[100, 0])
+        .answer(GetRes, ZOOM, CT, &[])
+        .answer(GetDef, ZOOM, CT, &[1]);
+    let r = camera(t).range(Control::ZoomAbsolute).unwrap();
+    assert_eq!((r.min, r.max), (Some(Value::Int(0)), Some(Value::Int(100))));
+    assert_eq!((r.step, r.default), (None, None));
+}
+
+#[test]
 fn info_reports_capability_bits() {
     let cam = camera(FakeTransport::default().answer(GetInfo, ZOOM, CT, &[0b0000_0111]));
     let info = cam.info(Control::ZoomAbsolute).unwrap();
