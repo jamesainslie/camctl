@@ -55,15 +55,13 @@ fn a_malformed_checksum_is_an_error() {
 }
 
 #[test]
-fn the_cask_installs_the_app_from_the_private_release() {
+fn the_cask_installs_the_app_from_the_public_release() {
     let cask = cask(&v("0.1.1"), APP_SHA);
     for want in [
-        "require_relative \"../custom_download_strategy\"",
         "cask \"camctl\" do",
         "version \"0.1.1\"",
         &format!("sha256 \"{APP_SHA}\""),
-        "url \"https://github.com/jamesainslie/camctl/releases/download/v#{version}/camctl-#{version}-macos-arm64.zip\",",
-        "using: GitHubPrivateRepositoryReleaseDownloadStrategy",
+        "url \"https://github.com/jamesainslie/camctl/releases/download/v#{version}/camctl-#{version}-macos-arm64.zip\"\n",
         "depends_on arch: :arm64",
         "depends_on macos: :sonoma",
         "depends_on formula: \"yaklabco/tap/camctl-cli\"",
@@ -97,7 +95,7 @@ fn the_cask_url_names_the_archive_the_checksum_is_for() {
     let url = cask
         .lines()
         .find_map(|l| l.trim().strip_prefix("url \""))
-        .and_then(|l| l.strip_suffix("\","))
+        .and_then(|l| l.strip_suffix('"'))
         .expect("a url line");
     assert!(
         url.ends_with(&format!("/{}", app_archive(&version))),
@@ -169,20 +167,26 @@ fn pre_releases_are_not_published_to_the_tap() {
 }
 
 #[test]
-fn the_formula_installs_the_cli_from_the_private_release() {
+fn the_formula_installs_the_cli_from_the_public_release() {
     let formula = formula(&v("0.1.1"), CLI_SHA);
     for want in [
-        "require_relative \"../custom_download_strategy\"",
         "class CamctlCli < Formula",
         "version \"0.1.1\"",
         "license \"MIT\"",
         &format!("sha256 \"{CLI_SHA}\""),
-        "url \"https://github.com/jamesainslie/camctl/releases/download/v0.1.1/camctl-cli-0.1.1-macos-arm64.tar.gz\",",
-        "using: GitHubPrivateRepositoryReleaseDownloadStrategy",
+        "url \"https://github.com/jamesainslie/camctl/releases/download/v0.1.1/camctl-cli-0.1.1-macos-arm64.tar.gz\"\n",
         "bin.install \"camctl\"",
         "shell_output(\"#{bin}/camctl --version\")",
     ] {
         assert!(formula.contains(want), "missing {want:?} in:\n{formula}");
+    }
+}
+
+#[test]
+fn downloads_need_no_token_now_the_repository_is_public() {
+    for text in [cask(&v("0.1.1"), APP_SHA), formula(&v("0.1.1"), CLI_SHA)] {
+        assert!(!text.contains("PrivateRepository"), "{text}");
+        assert!(!text.contains("custom_download_strategy"), "{text}");
     }
 }
 

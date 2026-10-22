@@ -187,18 +187,17 @@ camctl follows cameras as they are connected, disconnected and re-enumerated. A 
 ### Homebrew
 
 The [yaklabco tap](https://github.com/yaklabco/homebrew-tap) carries a cask
-for the app and a formula for the CLI. The repository is private, so
-Homebrew needs a GitHub token that can read it, in
-`HOMEBREW_GITHUB_API_TOKEN`, to download a release:
+for the app and a formula for the CLI:
 
 ```sh
-export HOMEBREW_GITHUB_API_TOKEN="$(gh auth token)"
 brew install --cask yaklabco/tap/camctl
 ```
 
+To install only the CLI, `brew install yaklabco/tap/camctl-cli`.
+
 The cask installs `camctl.app` into `/Applications` and pulls in the
 `camctl-cli` formula, which puts
-`camctl` on the `PATH`. `brew upgrade` needs the same token. Upgrading
+`camctl` on the `PATH`. Upgrading
 and uninstalling quit the app first, and macOS asks once whether your
 terminal may control camctl.
 

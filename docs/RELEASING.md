@@ -64,16 +64,18 @@ flowchart LR
      `camctl-cli-X.Y.Z-macos-arm64.tar.gz` and `SHA256SUMS`,
    - publishes a GitHub release, with that version's changelog section
      as the notes,
-   - and, when the `HOMEBREW_TAP_TOKEN` secret exists, writes
+   - and, when the `HOMEBREW_TAP_DEPLOY_KEY` secret exists, writes
      `Casks/camctl.rb` and `Formula/camctl-cli.rb` with
      `cargo xtask homebrew` and pushes them to the `main` branch of
      [yaklabco/homebrew-tap](https://github.com/yaklabco/homebrew-tap).
 
 ## Homebrew
 
-`HOMEBREW_TAP_TOKEN` is a token that can push to yaklabco/homebrew-tap,
-the same secret the yaklabco repositories use for GoReleaser. Without it
-the release skips the tap. To update the tap by hand for a published
+`HOMEBREW_TAP_DEPLOY_KEY` is the private half of an SSH deploy key with
+write access to yaklabco/homebrew-tap and to nothing else. The public
+half is registered on the tap as "camctl release (jamesainslie/camctl)".
+The workflow pins GitHub's published SSH host key for the push. Without
+the secret the release skips the tap. To update the tap by hand for a published
 release:
 
 ```sh
@@ -85,10 +87,8 @@ Run it from the release's commit, since the version comes from
 `Cargo.toml`. Then commit `chore(brew): update camctl to vX.Y.Z` in the
 tap and push.
 
-The cask and formula download through the tap's
-`GitHubPrivateRepositoryReleaseDownloadStrategy`, because this repository
-is private. Installing needs `HOMEBREW_GITHUB_API_TOKEN` set to a token
-that can read it.
+The repository is public, so the cask and formula download the release
+assets directly and installing needs no token.
 
 ## Signing and notarization
 

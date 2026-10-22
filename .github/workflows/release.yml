@@ -26,9 +26,10 @@ jobs:
     permissions:
       contents: write # create the GitHub release and upload its assets
     env:
-      # The Homebrew tap is updated only when this secret exists: a token
-      # that can push to yaklabco/homebrew-tap.
-      HAS_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN != '' }}
+      # The Homebrew tap is updated only when this secret exists: the
+      # private half of a deploy key with write access to
+      # yaklabco/homebrew-tap, and to nothing else.
+      HAS_TAP_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY != '' }}
     steps:
       # A release is Developer ID signed and notarized, or it is not made:
       # an ad-hoc build is blocked by Gatekeeper and loses its camera
@@ -130,13 +131,13 @@ jobs:
             dist/SHA256SUMS
 
       - name: Note that the Homebrew tap is not updated
-        if: env.HAS_TAP_TOKEN != 'true'
-        run: echo "::notice::HOMEBREW_TAP_TOKEN is not set; yaklabco/homebrew-tap was not updated"
+        if: env.HAS_TAP_KEY != 'true'
+        run: echo "::notice::HOMEBREW_TAP_DEPLOY_KEY is not set; yaklabco/homebrew-tap was not updated"
 
-      # The tap is public: clone and render without the token, which only
+      # The tap is public: clone and render without the key, which only
       # the push step sees.
       - name: Write the Homebrew cask and formula
-        if: env.HAS_TAP_TOKEN == 'true'
+        if: env.HAS_TAP_KEY == 'true'
         run: |
           set -euo pipefail
           tap="$RUNNER_TEMP/homebrew-tap"
@@ -145,13 +146,21 @@ jobs:
           ruby -c "$tap/Casks/camctl.rb" "$tap/Formula/camctl-cli.rb"
 
       - name: Push the cask and formula to yaklabco/homebrew-tap
-        if: env.HAS_TAP_TOKEN == 'true'
+        if: env.HAS_TAP_KEY == 'true'
         env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
         run: |
           set -euo pipefail
           version="${GITHUB_REF_NAME#v}"
+          key="$RUNNER_TEMP/tap-deploy-key"
+          known_hosts="$RUNNER_TEMP/known_hosts"
+          printf '%s\n' "$DEPLOY_KEY" > "$key"
+          chmod 600 "$key"
+          # GitHub's published host key (api.github.com/meta), pinned.
+          echo "github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl" > "$known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $key -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile=$known_hosts"
           cd "$RUNNER_TEMP/homebrew-tap"
+          git remote set-url --push origin git@github.com:yaklabco/homebrew-tap.git
           git add Casks/camctl.rb Formula/camctl-cli.rb
           if git diff --cached --quiet; then
             echo "the tap already has camctl $version"
@@ -161,7 +170,6 @@ jobs:
           git config user.name "YakLabs"
           git config user.email "official@yaklab.org"
           git commit -m "chore(brew): update camctl to v$version"
-          gh auth setup-git
           # Other repositories push to the tap too: rebase onto theirs.
           for attempt in 1 2 3; do
             if git push origin HEAD:main; then
