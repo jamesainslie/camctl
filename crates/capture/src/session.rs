@@ -190,6 +190,30 @@ pub fn encoding_of(subtype: u32, kind: DeviceKind) -> Encoding {
     }
 }
 
+/// The names of the notifications AVFoundation posts, on the default
+/// `NSNotificationCenter` with the device as the object, when a camera is
+/// connected and disconnected: `(connected, disconnected)`. A camera that
+/// re-enumerates (after the Mac sleeps, say) posts both.
+#[must_use]
+pub fn device_notifications() -> (&'static NSString, &'static NSString) {
+    // SAFETY: AVFoundation constants, always present on macOS.
+    unsafe {
+        (
+            objc2_av_foundation::AVCaptureDeviceWasConnectedNotification,
+            objc2_av_foundation::AVCaptureDeviceWasDisconnectedNotification,
+        )
+    }
+}
+
+/// The unique ID of the camera a device notification is about, given the
+/// notification's object. `None` for anything that is not a camera.
+#[must_use]
+pub fn unique_id_of(object: &AnyObject) -> Option<String> {
+    let device = object.downcast_ref::<AVCaptureDevice>()?;
+    // SAFETY: a property read on a live device.
+    Some(unsafe { device.uniqueID() }.to_string())
+}
+
 /// Every external and built-in video camera.
 #[must_use]
 pub fn devices() -> Vec<Device> {

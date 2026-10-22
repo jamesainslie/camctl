@@ -7,8 +7,8 @@ mod session;
 mod slot;
 
 pub use session::{
-    Authorization, CaptureError, Device, DeviceKind, Frame, Session, authorization, devices,
-    encoding_of, request_access,
+    Authorization, CaptureError, Device, DeviceKind, Frame, Session, authorization,
+    device_notifications, devices, encoding_of, request_access, unique_id_of,
 };
 
 /// The USB identity encoded in a UVC camera's AVFoundation unique ID:
@@ -38,6 +38,39 @@ pub fn pick_camera(unique_ids: &[&str], preferred: Option<&str>) -> Option<usize
         .and_then(|want| unique_ids.iter().position(|id| *id == want))
         .or_else(|| unique_ids.iter().position(|id| usb_identity(id).is_some()))
         .or_else(|| (!unique_ids.is_empty()).then_some(0))
+}
+
+/// What a preview is showing, for [`follow`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Showing<'a> {
+    /// The unique ID of the camera it was opened for, if any.
+    pub target: Option<&'a str>,
+    /// Whether it has a capture session for that camera.
+    pub healthy: bool,
+    /// Whether that camera just disconnected and came back (it
+    /// re-enumerated), which leaves every handle to it dead.
+    pub reconnected: bool,
+}
+
+/// What a preview should do now that the connected cameras changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Follow {
+    Stay,
+    /// Open a fresh preview, which picks the camera with [`pick_camera`].
+    Reopen,
+}
+
+/// Whether a preview showing `showing` should reopen, given the cameras
+/// connected now (unique IDs in [`devices`] order) and the user's choice.
+#[must_use]
+pub fn follow(unique_ids: &[&str], preferred: Option<&str>, showing: Showing<'_>) -> Follow {
+    let want = pick_camera(unique_ids, preferred).and_then(|i| unique_ids.get(i).copied());
+    let reopen = match (want, showing.target) {
+        (None, None) => false,
+        (Some(want), Some(target)) if want == target => !showing.healthy || showing.reconnected,
+        _ => true,
+    };
+    if reopen { Follow::Reopen } else { Follow::Stay }
 }
 
 #[cfg(test)]
@@ -85,6 +118,69 @@ mod tests {
     fn with_no_usb_camera_the_first_camera_wins() {
         assert_eq!(pick_camera(&[BUILT_IN], None), Some(0));
         assert_eq!(pick_camera(&[], Some(OBSBOT)), None);
+    }
+
+    fn reopen(ids: &[&str], preferred: Option<&str>, showing: Showing<'_>) -> bool {
+        follow(ids, preferred, showing) == Follow::Reopen
+    }
+
+    fn healthy(id: &str) -> Showing<'_> {
+        Showing {
+            target: Some(id),
+            healthy: true,
+            reconnected: false,
+        }
+    }
+
+    #[test]
+    fn a_healthy_preview_of_the_right_camera_stays() {
+        assert!(!reopen(&[BUILT_IN, OBSBOT], None, healthy(OBSBOT)));
+        assert!(!reopen(
+            &[BUILT_IN, OBSBOT],
+            Some(BUILT_IN),
+            healthy(BUILT_IN)
+        ));
+    }
+
+    #[test]
+    fn the_wanted_camera_arriving_takes_over_from_a_fallback() {
+        // Launched before the OBSBOT was plugged in (or while it was
+        // re-enumerating), so the built-in camera was shown.
+        assert!(reopen(&[BUILT_IN, OBSBOT], None, healthy(BUILT_IN)));
+        assert!(reopen(&[BUILT_IN, OBSBOT], Some(OBSBOT), healthy(BUILT_IN)));
+    }
+
+    #[test]
+    fn losing_the_shown_camera_falls_back_or_waits() {
+        assert!(reopen(&[BUILT_IN], Some(OBSBOT), healthy(OBSBOT)));
+        assert!(reopen(&[], Some(OBSBOT), healthy(OBSBOT)));
+    }
+
+    #[test]
+    fn a_preview_with_nothing_to_show_stays_until_a_camera_comes() {
+        let nothing = Showing {
+            target: None,
+            healthy: false,
+            reconnected: false,
+        };
+        assert!(!reopen(&[], None, nothing));
+        assert!(reopen(&[OBSBOT], None, nothing));
+    }
+
+    #[test]
+    fn a_broken_or_re_enumerated_preview_of_the_wanted_camera_reopens() {
+        let broken = Showing {
+            target: Some(OBSBOT),
+            healthy: false,
+            reconnected: false,
+        };
+        assert!(reopen(&[OBSBOT], None, broken));
+        let re_enumerated = Showing {
+            target: Some(OBSBOT),
+            healthy: true,
+            reconnected: true,
+        };
+        assert!(reopen(&[OBSBOT], None, re_enumerated));
     }
 
     #[test]
