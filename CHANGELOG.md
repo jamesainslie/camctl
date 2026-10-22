@@ -25,6 +25,9 @@ anything else bumps the patch; see [docs/RELEASING.md](docs/RELEASING.md).
 
 ### Changed
 
+- The repository is public. `brew install --cask yaklabco/tap/camctl`
+  needs no GitHub token, and the release workflow pushes to the tap
+  with a deploy key scoped to it.
 - Releases are Developer ID signed and notarized, so Gatekeeper opens a
   downloaded camctl and the camera permission survives updates. The
   release workflow refuses to publish without the signing and notary
