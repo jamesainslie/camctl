@@ -40,7 +40,19 @@ check "the hardened runtime is on" grep -Eq '^CodeDirectory .*flags=.*runtime' <
 check "it has a secure timestamp" grep -q '^Timestamp=' <<<"$details"
 check "it may use the camera" \
   grep -Eq 'com\.apple\.security\.device\.camera</key>[[:space:]]*<true/>' <<<"$entitlements"
-check "its notarization ticket is stapled" xcrun stapler validate -q "$app"
+# Shows stapler's own words when it fails, which say why.
+stapled() {
+  local out
+  if out="$(xcrun stapler validate "$1" 2>&1)"; then
+    return 0
+  fi
+  local line
+  while IFS= read -r line; do
+    printf '  stapler: %s\n' "$line" >&2
+  done <<<"$out"
+  return 1
+}
+check "its notarization ticket is stapled" stapled "$app"
 
 # Captured before matching: grep -q leaving early would kill spctl with
 # SIGPIPE, and pipefail would fail the check at random.
