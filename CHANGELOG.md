@@ -9,6 +9,8 @@ anything else bumps the patch; see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-10-29
+
 ### Added
 
 - camctl remembers where each camera points. Pan, tilt and zoom are
@@ -130,7 +132,8 @@ anything else bumps the patch; see [docs/RELEASING.md](docs/RELEASING.md).
 - `cargo xtask` task runner, CI on GitHub Actions, and changelog-driven
   releases that publish the signed app and the CLI.
 
-[Unreleased]: https://github.com/jamesainslie/camctl/compare/v0.1.2...HEAD
+[Unreleased]: https://github.com/jamesainslie/camctl/compare/v0.1.3...HEAD
+[0.1.3]: https://github.com/jamesainslie/camctl/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/jamesainslie/camctl/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/jamesainslie/camctl/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/jamesainslie/camctl/releases/tag/v0.1.0
