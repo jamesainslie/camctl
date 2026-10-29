@@ -17,6 +17,7 @@ use camctl_capture::policy::Want;
 use camctl_capture::{Authorization, Frame, Session};
 use camctl_core::health::{ControlHealth, Verdict, reconnect_delay};
 use camctl_core::motion::{Limits, Motion, Rig, Speeds, Stick, Targets, cover_offset, drag_stick};
+use camctl_core::pose::Pose;
 use camctl_core::{ControlQueue, QueueEvent, quirks};
 use camctl_uvc::{CameraError, Control, ControlRange, TransportError, Value};
 use futures::StreamExt;
@@ -102,15 +103,17 @@ pub enum Sleep {
     Asleep {
         wake_aim: Option<(f64, f64)>,
     },
-    /// Woken, with `aim` still to be sent again on the first frame. A
-    /// Tiny 2 Lite in its own sleep ignores pan and tilt until a stream
-    /// wakes it, then settles at a pose of its choosing. In testing, its
-    /// first frame came once it had settled, so one resend was enough.
-    /// The aim is kept until it goes out on a working link, so controls
-    /// that reconnect meanwhile (or a preview reopened meanwhile) still
-    /// aim the camera off the floor.
+    /// Woken, or opened with a remembered pose, with `aim` and `zoom`
+    /// still to be sent again on the first frame. A Tiny 2 Lite in its own
+    /// sleep ignores pan and tilt until a stream wakes it, then settles at
+    /// a pose of its choosing. In testing, its first frame came once it
+    /// had settled, so one resend was enough. The pose is kept until it
+    /// goes out on a working link, so controls that reconnect meanwhile
+    /// (or a preview reopened meanwhile) still aim the camera off the
+    /// floor.
     Waking {
-        aim: (f64, f64),
+        aim: Option<(f64, f64)>,
+        zoom: Option<f64>,
     },
 }
 
@@ -186,6 +189,12 @@ pub struct Preview {
     sleep: Sleep,
     /// Where this camera tilts to sleep, if not the bottom of its range.
     sleep_tilt: Option<f64>,
+    /// Whether the rig holds where the camera really points: a read came
+    /// back, or a remembered pose went out to an awake camera. Until then
+    /// the rig may hold the pose the camera slept in, not one to keep.
+    pose_known: bool,
+    /// The pose last kept in user defaults for this camera.
+    remembered: Option<Pose>,
     tasks: Vec<Task<()>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -217,6 +226,26 @@ fn is_shortcut(m: Modifiers) -> bool {
 fn degrees(v: f64) -> String {
     let rounded = v.round();
     format!("{}°", if rounded == 0.0 { 0.0 } else { rounded })
+}
+
+/// Where the camera points, to open it there next time: the rig while
+/// awake, or where it wakes to while asleep. `None` while camctl does not
+/// know (`pose_known`), or while the pose to keep is still on its way to
+/// the camera.
+fn pose_to_keep(sleep: Sleep, pose_known: bool, rig: Option<&Rig>) -> Option<Pose> {
+    let rig = rig.filter(|_| pose_known)?;
+    let (pan, tilt) = match sleep {
+        Sleep::Awake => (rig.pan, rig.tilt),
+        Sleep::Asleep {
+            wake_aim: Some(aim),
+        } => aim,
+        Sleep::Asleep { wake_aim: None } | Sleep::Waking { .. } => return None,
+    };
+    Some(Pose {
+        pan,
+        tilt,
+        zoom: rig.zoom,
+    })
 }
 
 fn px_f64(p: Pixels) -> f64 {
@@ -311,6 +340,8 @@ impl Preview {
             away,
             sleep,
             sleep_tilt: None,
+            pose_known: false,
+            remembered: None,
             tasks: vec![frames, results],
             _subscriptions: Self::observe_window(window, cx),
         };
@@ -410,6 +441,7 @@ impl Preview {
         cx.emit(PreviewEvent::Camera(device.unique_id.clone().into()));
         self.identity = camctl_capture::usb_identity(&device.unique_id);
         if self.identity.is_some() {
+            self.remembered = crate::prefs::pose(&device.unique_id);
             trace("open_controls");
             self.open_controls(cx);
         }
@@ -688,7 +720,7 @@ impl Preview {
         &mut self,
         camera: UsbCamera,
         Initial {
-            rig,
+            mut rig,
             can_aim,
             can_zoom,
             zoom_step,
@@ -697,8 +729,19 @@ impl Preview {
         }: Initial,
         cx: &mut Context<Self>,
     ) {
+        // A move made on the old link, before it died, is kept; then the
+        // camera goes back there, in case it reset itself meanwhile.
+        self.remember_pose();
+        self.restore_pose();
         self.can_aim = can_aim;
         self.can_zoom = can_zoom;
+        // A zoom to restore starts the slider there, not where the camera
+        // happens to be.
+        if let Sleep::Waking { zoom: Some(z), .. } = self.sleep
+            && can_zoom
+        {
+            rig.zoom = rig.zoom_limits.clamp(z);
+        }
         if can_zoom {
             let z = rig.zoom_limits;
             #[expect(
@@ -727,6 +770,10 @@ impl Preview {
         self.sleep_tilt = quirks::sleep_tilt(vendor_id, product_id);
         self.health = ControlHealth::default();
         self.last_zoom_sent = None;
+        // The camera may have reset itself (re-enumerated, say) since the
+        // last link: only a read, or a pose sent once it is awake, says
+        // where it points now.
+        self.pose_known = false;
         self.controls_gen += 1;
         let generation = self.controls_gen;
         let events = self.events.clone();
@@ -746,23 +793,29 @@ impl Preview {
         trace("controls ready");
         // Asleep before the controls were ready, or carried over asleep
         // from a reopened preview: park now. A carried-over aim to wake to
-        // is kept; the pose read just now is the parked one.
+        // is kept, else the remembered one; the pose read just now may be
+        // where the camera slept.
         if let Sleep::Asleep { wake_aim } = self.sleep {
+            let remembered = self.remembered.map(|p| (p.pan, p.tilt));
             let parked_from = self.park();
             self.sleep = Sleep::Asleep {
-                wake_aim: wake_aim.or(parked_from),
+                wake_aim: wake_aim.or(remembered).or(parked_from),
             };
-        } else if let Sleep::Waking { aim: (pan, tilt) } = self.sleep
+        } else if let Sleep::Waking { aim, zoom } = self.sleep
             && let Some(motion) = self.motion.as_mut()
         {
-            // Woken before these controls were ready, or across a reconnect
-            // or reopen: the aim may never have reached the camera.
-            let _ = motion.aim(pan, tilt);
-            self.send_aim();
+            // Woken before these controls were ready, across a reconnect or
+            // reopen, or opened with a remembered pose: the pose may never
+            // have reached the camera. The zoom is in the rig already.
+            if let Some((pan, tilt)) = aim {
+                let _ = motion.aim(pan, tilt);
+            }
+            self.resend(zoom.is_some());
             // Already streaming, the camera is awake and obeys now; else the
-            // first frame sends the aim once more.
+            // first frame sends the pose once more.
             if self.status == Status::Live {
                 self.sleep = Sleep::Awake;
+                self.pose_known = true;
             }
         }
         cx.notify();
@@ -810,12 +863,15 @@ impl Preview {
             (Control::PanTiltAbsolute, Ok(v)) => {
                 if let Some((pan, tilt)) = v.pan_tilt_degrees() {
                     motion.sync(pan, tilt, rig.zoom);
+                    self.pose_known = true;
                 }
             }
             (Control::ZoomAbsolute, Ok(Value::Int(z))) => {
                 #[expect(clippy::cast_precision_loss, reason = "zoom units are small integers")]
                 motion.sync(rig.pan, rig.tilt, z as f64);
                 self.last_zoom_sent = Some(z);
+                // Pan and tilt are read first, when the camera has them.
+                self.pose_known |= !self.can_aim;
                 self.sync_slider(window, cx);
             }
             _ => return,
@@ -830,7 +886,11 @@ impl Preview {
             loop {
                 cx.background_executor().timer(SYNC_EVERY).await;
                 let alive = this.update(cx, |this, _| {
+                    this.remember_pose();
+                    // Before its first frame a camera may still report
+                    // the pose it slept in.
                     if this.running
+                        && this.status == Status::Live
                         && !this.ticking
                         && this.last_write.elapsed() >= SETTLE
                         && let Some(queue) = &this.queue
@@ -868,10 +928,13 @@ impl Preview {
             trace("first frame");
             cx.emit(PreviewEvent::Live(true));
             // Without a working link the aim waits for `controls_ready`.
-            if matches!(self.sleep, Sleep::Waking { .. }) && self.queue.is_some() {
+            if let Sleep::Waking { zoom, .. } = self.sleep
+                && self.queue.is_some()
+            {
                 self.sleep = Sleep::Awake;
+                self.pose_known = true;
                 trace("aiming again now the camera is awake");
-                self.send_aim();
+                self.resend(zoom.is_some());
             }
         }
         cx.notify();
@@ -906,6 +969,8 @@ impl Preview {
     pub fn shut_down(&mut self, cx: &mut Context<Self>) -> futures::channel::oneshot::Receiver<()> {
         let (tx, rx) = futures::channel::oneshot::channel::<()>();
         trace("closing for another camera");
+        // A move made since the last save is kept.
+        self.remember_pose();
         self.closing = true;
         self.watchdog = None;
         self.controls_task = None;
@@ -979,8 +1044,14 @@ impl Preview {
         if let Some(motion) = self.motion.as_mut() {
             motion.set_stick(Stick::default());
         }
+        // An aim still on its way (no controls yet to park with) is where
+        // to wake to.
+        let pending = match self.sleep {
+            Sleep::Waking { aim, .. } => aim,
+            Sleep::Awake | Sleep::Asleep { .. } => None,
+        };
         self.sleep = Sleep::Asleep {
-            wake_aim: self.park(),
+            wake_aim: self.park().or(pending),
         };
         cx.emit(PreviewEvent::Asleep(true));
         self.refresh_streaming(cx);
@@ -1000,7 +1071,10 @@ impl Preview {
                 let _ = motion.aim(pan, tilt);
                 self.send_aim();
             }
-            self.sleep = Sleep::Waking { aim: (pan, tilt) };
+            self.sleep = Sleep::Waking {
+                aim: Some((pan, tilt)),
+                zoom: None,
+            };
         }
         cx.emit(PreviewEvent::Asleep(false));
         self.refresh_streaming(cx);
@@ -1015,6 +1089,48 @@ impl Preview {
         let was = self.motion.as_mut()?.park(self.sleep_tilt);
         self.send_aim();
         Some(was)
+    }
+
+    /// Send the camera back where camctl last left it, unless it is asleep
+    /// or already waking to a pose of its own. The camera may have reset
+    /// itself: relaunched, re-enumerated, or woken from its own sleep.
+    fn restore_pose(&mut self) {
+        let Some(pose) = self.remembered else {
+            return;
+        };
+        if self.sleep != Sleep::Awake {
+            return;
+        }
+        trace(&format!(
+            "restoring pan {} tilt {} zoom {}",
+            degrees(pose.pan),
+            degrees(pose.tilt),
+            pose.zoom.round()
+        ));
+        self.sleep = Sleep::Waking {
+            aim: Some((pose.pan, pose.tilt)),
+            zoom: Some(pose.zoom),
+        };
+    }
+
+    /// Keep the camera's pose in user defaults, if it moved since it was
+    /// last kept. A preview closing for another camera keeps nothing more.
+    fn remember_pose(&mut self) {
+        if self.closing {
+            return;
+        }
+        let rig = self.motion.as_ref().map(Motion::rig);
+        let Some(pose) = pose_to_keep(self.sleep, self.pose_known, rig) else {
+            return;
+        };
+        if self.remembered == Some(pose) {
+            return;
+        }
+        let Some(id) = self.target_id() else {
+            return;
+        };
+        crate::prefs::set_pose(id, pose);
+        self.remembered = Some(pose);
     }
 
     /// Stream exactly when the window can be seen, the user is here and
@@ -1087,6 +1203,19 @@ impl Preview {
         }
         session.start_fresh();
         self.running = true;
+        // Paused long enough, a Tiny 2 Lite drops into its own sleep and
+        // wakes at a pose of its choosing: send the pose again with the
+        // first frame.
+        if self.sleep == Sleep::Awake
+            && self.pose_known
+            && let Some(r) = self.motion.as_ref().map(|m| *m.rig())
+        {
+            let aim = self.can_aim.then_some((r.pan, r.tilt));
+            let zoom = self.can_zoom.then_some(r.zoom);
+            if aim.is_some() || zoom.is_some() {
+                self.sleep = Sleep::Waking { aim, zoom };
+            }
+        }
         if matches!(self.status, Status::Paused(_) | Status::Failed(_)) {
             self.status = Status::Starting;
         }
@@ -1105,6 +1234,23 @@ impl Preview {
                 zoom: None,
             });
         }
+    }
+
+    /// Send the rig's pan and tilt again, and its zoom too if `zoom`, for
+    /// what the camera can do. The zoom goes out even if it went before: a
+    /// camera waking from its own sleep may have dropped it.
+    fn resend(&mut self, zoom: bool) {
+        let Some(r) = self.motion.as_ref().map(|m| *m.rig()) else {
+            return;
+        };
+        let zoom = zoom && self.can_zoom;
+        if zoom {
+            self.last_zoom_sent = None;
+        }
+        self.send(Targets {
+            pan_tilt: self.can_aim.then_some((r.pan, r.tilt)),
+            zoom: zoom.then_some(r.zoom),
+        });
     }
 
     fn send(&mut self, targets: Targets) {
@@ -1902,7 +2048,62 @@ impl Render for Preview {
 
 #[cfg(test)]
 mod tests {
-    use super::degrees;
+    use super::{Limits, Pose, Rig, Sleep, degrees, pose_to_keep};
+
+    fn rig() -> Rig {
+        Rig {
+            pan: -12.0,
+            tilt: 4.0,
+            zoom: 30.0,
+            pan_limits: Limits::new(-130.0, 130.0),
+            tilt_limits: Limits::new(-90.0, 90.0),
+            zoom_limits: Limits::new(0.0, 100.0),
+            pan_sign: -1.0,
+        }
+    }
+
+    #[test]
+    fn an_awake_camera_keeps_where_it_points() {
+        assert_eq!(
+            pose_to_keep(Sleep::Awake, true, Some(&rig())),
+            Some(Pose {
+                pan: -12.0,
+                tilt: 4.0,
+                zoom: 30.0
+            })
+        );
+    }
+
+    #[test]
+    fn a_sleeping_camera_keeps_where_it_wakes_to_not_the_floor() {
+        let parked = Rig {
+            pan: 0.0,
+            tilt: -80.0,
+            ..rig()
+        };
+        let asleep = Sleep::Asleep {
+            wake_aim: Some((-12.0, 4.0)),
+        };
+        let kept = pose_to_keep(asleep, true, Some(&parked)).map(|p| (p.pan, p.tilt));
+        assert_eq!(kept, Some((-12.0, 4.0)));
+    }
+
+    #[test]
+    fn nothing_is_kept_while_the_pose_is_unknown_or_on_its_way() {
+        let waking = Sleep::Waking {
+            aim: Some((1.0, 2.0)),
+            zoom: Some(3.0),
+        };
+        let cases = [
+            (Sleep::Awake, false, Some(rig())),
+            (Sleep::Awake, true, None),
+            (Sleep::Asleep { wake_aim: None }, true, Some(rig())),
+            (waking, true, Some(rig())),
+        ];
+        for (sleep, known, rig) in cases {
+            assert_eq!(pose_to_keep(sleep, known, rig.as_ref()), None, "{sleep:?}");
+        }
+    }
 
     #[test]
     fn degrees_never_show_minus_zero() {
