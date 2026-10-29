@@ -9,6 +9,15 @@ anything else bumps the patch; see [docs/RELEASING.md](docs/RELEASING.md).
 
 ## [Unreleased]
 
+### Added
+
+- camctl remembers where each camera points. Pan, tilt and zoom are
+  saved in its user defaults, per camera, while they change and on quit,
+  and sent back whenever the camera may have reset itself: when camctl
+  next opens it, after the camera reconnects or the Mac wakes, and when
+  the preview resumes after a pause. A Tiny 2 Lite that dropped into its
+  own sleep no longer wakes wherever it settled.
+
 ## [0.1.2] - 2026-10-22
 
 ### Added

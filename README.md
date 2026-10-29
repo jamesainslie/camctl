@@ -146,6 +146,22 @@ The bar below the video holds the zoom slider, the current magnification (1.0x t
 
 Drag and click aiming require a camera that reports absolute pan and tilt with a readable range. Zoom inputs and the slider require absolute zoom. The pad shows only the buttons the camera supports.
 
+### Remembered aim and zoom
+
+camctl remembers where each camera points and sends it back there whenever the camera may have reset itself: after a relaunch, a restart of the Mac, the camera reconnecting or re-enumerating, the Mac waking, and the preview resuming after a pause. A Tiny 2 Lite whose video stops tips into its own sleep and wakes at a pose of its choosing, so without this, the camera started from wherever it settled.
+
+- camctl saves the pan, tilt and zoom about every 2 s while they change, and again when it quits or switches cameras. Moves the camera makes by itself, such as OBSBOT's on-device tracking, are saved too, because camctl reads the position back while the preview streams.
+- On opening a camera it has seen before, or opening USB control again, camctl sends the saved pose as soon as it has USB control, and again with the first frame, the same way it wakes from [Sleep](#sleep). Resuming after a pause sends the pose again with the first frame. Input in between still moves the camera.
+- A camera asleep in camctl is saved where it will wake to, not facing the desk. Put to sleep before camctl has USB control, it wakes to the saved pose.
+- Nothing is saved until camctl knows where the camera points: a read has come back while frames flow, or the saved pose has reached the awake camera. camctl reads the position back only once frames flow, because a camera that has not streamed yet may still report the pose it slept in.
+
+The poses are kept in camctl's user defaults, one per camera, by the camera's AVFoundation unique ID:
+
+```sh
+defaults read us.ainslies.camctl            # pose.<unique ID> = "pan -12 tilt 4 zoom 30"
+defaults delete us.ainslies.camctl pose.<unique ID>    # forget one camera's pose
+```
+
 ### Sleep
 
 The **Sleep** button at the right of the bar, or **Sleep Camera** in the menu bar menu, puts the camera to sleep:
@@ -160,13 +176,13 @@ On a Tiny 2 Lite, the lens tilts to -80 degrees, and the camera then tips the re
 
 Other apps that use the camera keep streaming from it. Sleep stops only camctl's preview, so the camera light stays on while another app streams.
 
-The Sleep button sits in the bar, which appears only for a camera that camctl controls over USB. The menu item works for every camera. A camera without absolute pan and tilt does not move, so Sleep only stops the preview and Wake only resumes it. camctl does not remember sleep across launches. It starts awake, and if you quit while the camera sleeps, it does not aim the camera back.
+The Sleep button sits in the bar, which appears only for a camera that camctl controls over USB. The menu item works for every camera. A camera without absolute pan and tilt does not move, so Sleep only stops the preview and Wake only resumes it. camctl does not remember sleep across launches. It starts awake, and a camera that slept when camctl quit opens where it pointed before it slept (see [Remembered aim and zoom](#remembered-aim-and-zoom)).
 
 ### Choosing the camera
 
 The **Camera** submenu in the menu bar menu lists every connected camera, USB and built in, with a check beside the one the preview shows. The list is read each time the menu opens, so a camera plugged in a moment ago appears. Two cameras with the same name are numbered, in the order macOS lists them.
 
-Choosing another camera stops the current one, then opens the new one in the same window and shows the preview. The old camera stays where it points, and the new camera's aim and zoom are read from it. camctl remembers each camera's sleep while it runs, so the new camera starts awake unless it was asleep when camctl last showed it. The controls, pad and Sleep button follow what the new camera supports. Choosing the checked camera again shows the preview, and reopens the camera if camctl could not open it.
+Choosing another camera stops the current one, then opens the new one in the same window and shows the preview. The old camera stays where it points. The new camera returns to its [remembered aim and zoom](#remembered-aim-and-zoom), or, the first time camctl sees it, its aim and zoom are read from it. camctl remembers each camera's sleep while it runs, so the new camera starts awake unless it was asleep when camctl last showed it. The controls, pad and Sleep button follow what the new camera supports. Choosing the checked camera again shows the preview, and reopens the camera if camctl could not open it.
 
 camctl remembers the choice across launches, by the camera's AVFoundation unique ID, in its user defaults (`defaults read us.ainslies.camctl camera`). A USB camera's ID includes its USB location, so the same camera plugged into another port counts as a different one. When the chosen camera is not connected at launch, camctl falls back to the first USB camera, or else the first camera of any kind, and keeps the choice. When the chosen camera is connected later, the preview switches to it. To forget the choice:
 
@@ -348,7 +364,7 @@ Negative values parse as values, not flags, so `camctl point -20 5` and `camctl 
 | `crates/uvc` (`camctl-uvc`) | UVC descriptor parsing, the control catalogue, wire encoding of values, and `Camera`, which drives controls through a `Transport` trait. No I/O |
 | `crates/usb` (`camctl-usb`) | `Transport` over nusb (IOKit): finds devices with a UVC video control interface and sends class requests on the default control pipe, 500 ms timeout |
 | `crates/capture` (`camctl-capture`) | AVFoundation devices, camera permission, the stream format policy, and a capture session that keeps only the newest frame |
-| `crates/core` (`camctl-core`) | UI-independent logic: the motion model, including the sleep aim, the per-camera quirks table, `ControlQueue` and the control-link health check |
+| `crates/core` (`camctl-core`) | UI-independent logic: the motion model, including the sleep aim, the remembered pose's text form, the per-camera quirks table, `ControlQueue` and the control-link health check |
 | `crates/cli` (`camctl-cli`) | The `camctl` binary |
 | `crates/app` (`camctl-app`) | The GPUI app (through gpui-kit): preview window, AppKit menu bar item, screen saver and lock watcher, camera connect and Mac wake watcher, and the one-instance lock |
 
@@ -383,7 +399,7 @@ flowchart TD
 
 **Control path.** While input is held, the app ticks the motion model every 33 ms. Each tick ramps the velocity toward the held speed and advances absolute pan, tilt and zoom targets. Releasing stops the targets at once, and the motor's own lag brings the camera to rest. Clicks, scroll steps, the slider, Home, Sleep and Wake produce single targets. Targets go to `ControlQueue`, which keeps only the newest value per control. A worker thread sends whatever is pending, in the order of each control's latest request, so a burst of requests collapses to the write in flight plus the final value, and dependent writes keep their order: auto focus off, then a manual focus. Reads queue the same way and run after the pending writes. Every result goes to a health check. Three failures in a row, or one that says the device is gone, mark the link dead, and the app drops the queue and opens the camera's USB device again with backoff. A stall is an answer, so it does not count. Control transfers use the default pipe and need no exclusive access, so they work while the system driver owns the camera and other apps stream from it.
 
-**Pairing.** The app previews the camera chosen in the **Camera** menu if it is connected, otherwise the first USB camera AVFoundation lists, or the first camera of any kind. Switching cameras stops the old capture session off the UI thread, then replaces the window's preview view with a new one, so no per-camera state carries over except sleep. The app watches AVFoundation's camera connect and disconnect notifications and the Mac's wake notification. Once the cameras have settled, it makes the same choice again and replaces the preview the same way when the answer differs, when the shown camera re-enumerated, or when it could not be opened. For a UVC camera, AVFoundation's unique ID encodes the IOKit location ID, vendor ID and product ID, and the app opens the nusb device that matches all three. Enumeration and the first reads run off the UI thread, and each first read is tried up to 4 times, 150 ms apart, because a camera that is starting its stream can stall or time out briefly. A camera that does not answer the pan, tilt or zoom reads at all fails the open, which is then tried again, rather than opening without those controls.
+**Pairing.** The app previews the camera chosen in the **Camera** menu if it is connected, otherwise the first USB camera AVFoundation lists, or the first camera of any kind. Switching cameras stops the old capture session off the UI thread, then replaces the window's preview view with a new one, so no per-camera state carries over except sleep, and the pose kept in user defaults. The app watches AVFoundation's camera connect and disconnect notifications and the Mac's wake notification. Once the cameras have settled, it makes the same choice again and replaces the preview the same way when the answer differs, when the shown camera re-enumerated, or when it could not be opened. For a UVC camera, AVFoundation's unique ID encodes the IOKit location ID, vendor ID and product ID, and the app opens the nusb device that matches all three. Enumeration and the first reads run off the UI thread, and each first read is tried up to 4 times, 150 ms apart, because a camera that is starting its stream can stall or time out briefly. A camera that does not answer the pan, tilt or zoom reads at all fails the open, which is then tried again, rather than opening without those controls.
 
 ## Development
 
@@ -421,7 +437,7 @@ The tests need no camera:
   Tiny 2 Lite (`crates/uvc/tests/fixtures`) and drive `Camera` through fake
   transports.
 - The `core` tests cover the motion model and the sleep aim, the click and
-  drag geometry, the per-camera quirks, the queue's coalescing and order,
+  drag geometry, the remembered pose's text form, the per-camera quirks, the queue's coalescing and order,
   and the control-link health check and its backoff.
 - The `capture` tests cover the format policy, the frame hand-off, the
   camera choice and when the preview follows the connected cameras.
